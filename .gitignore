@@ -1,0 +1,29 @@
+# Virtual Environment
+.venv/
+venv/
+
+# Python Cache & Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Generated Databases & Runtime Files
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Assessment Document
+ML_Intern_Take_Home_Assesment_2026.pdf
+
+# OS & IDE files
+.DS_Store
+.idea/
+.vscode/
