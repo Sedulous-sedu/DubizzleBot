@@ -247,10 +247,35 @@ def test_interpret_prompt_injection_rejection():
             listing_id=38  # Extra forbidden attribute
         )
 
+def test_interpret_year_range_ferrari():
+    """Verify 'Show me Ferraris from 2000 to 2005' extracts make=Ferrari, min_year=2000, max_year=2005."""
+    payload = LLMIntentPayload(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Ferrari", min_year=2000, max_year=2005)
+    )
+    interpreter = create_mock_interpreter(payload)
+    res = interpreter.interpret("Show me Ferraris from 2000 to 2005")
+    assert res.intent == UserIntentEnum.INVENTORY_SEARCH
+    assert res.query_filters.make == "Ferrari"
+    assert res.query_filters.min_year == 2000
+    assert res.query_filters.max_year == 2005
+    assert res.readiness_state == SearchReadinessState.READY
+
+    car_filter = res.query_filters.to_car_filter()
+    assert car_filter.make == "Ferrari"
+    assert car_filter.min_year == 2000
+    assert car_filter.max_year == 2005
+
 def test_interpret_schema_range_invariant_violation():
-    """Verify range invariant validation fails when min_price > max_price."""
+    """Verify range invariant validation fails when min_price > max_price or min_year > max_year."""
     with pytest.raises(ValidationError):
         ParsedInventoryQuery(
             min_price_aed=200000.0,
             max_price_aed=100000.0
         )
+    with pytest.raises(ValidationError):
+        ParsedInventoryQuery(
+            min_year=2025,
+            max_year=2020
+        )
+

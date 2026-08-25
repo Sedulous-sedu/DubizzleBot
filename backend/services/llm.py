@@ -70,7 +70,7 @@ class LLMService:
                 else:
                     data = content
                 return response_model.model_validate(data)
-            except (litellm.exceptions.RateLimitError, litellm.exceptions.APIConnectionError, litellm.exceptions.Timeout) as e:
+            except (litellm.exceptions.RateLimitError, litellm.exceptions.APIConnectionError, litellm.exceptions.Timeout, litellm.exceptions.ServiceUnavailableError, litellm.exceptions.InternalServerError) as e:
                 last_exception = e
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay_seconds * (attempt + 1))
