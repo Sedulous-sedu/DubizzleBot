@@ -2,6 +2,7 @@
 
 import uuid
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional, List
 from backend.models.car import CarListing
@@ -14,6 +15,7 @@ from backend.models.intent import (
 from backend.models.memory import (
     ResolutionStatus,
     ContextResolutionResult,
+    PendingSupportedSearch,
     SessionState,
 )
 from backend.models.persistent_memory import (
@@ -152,7 +154,53 @@ class ChatOrchestrator:
                     requires_clarification=True
                 )
 
-            # 3. Fresh query: Route via QueryInterpreter and Phase 3B logic
+            # 3. Resolve a pending unsupported-search confirmation only after
+            # workflow, long-term-memory, and contextual-reference routing.
+            if session.pending_supported_search is not None:
+                confirmation = self._supported_search_confirmation(request.message)
+                if confirmation is True:
+                    pending = session.pending_supported_search
+                    session.pending_supported_search = None
+                    self.memory_service.save_session(session)
+                    confirmed_intent = ParsedUserIntent(
+                        intent=UserIntentEnum.INVENTORY_SEARCH,
+                        query_filters=pending.query_filters,
+                        requires_clarification=False,
+                        clarification_question=None,
+                        unsupported_constraints=[],
+                        readiness_state=SearchReadinessState.READY,
+                    )
+                    return self._handle_inventory_search(
+                        request.user_id,
+                        session_id,
+                        request.message,
+                        confirmed_intent,
+                    )
+                if confirmation is False:
+                    session.pending_supported_search = None
+                    self.memory_service.save_session(session)
+                    response_text = "Okay — I won't run that search."
+                    self.memory_service.record_turn(
+                        user_id=request.user_id,
+                        session_id=session_id,
+                        user_message=request.message,
+                        assistant_response=response_text,
+                        intent=UserIntentEnum.INVENTORY_SEARCH,
+                        matched_cars=None,
+                        referenced_listing_id=None,
+                        replace_result_set=False,
+                    )
+                    return ChatResponse(
+                        user_id=request.user_id,
+                        session_id=session_id,
+                        response=response_text,
+                        matched_cars=None,
+                        intent=UserIntentEnum.INVENTORY_SEARCH,
+                        total_matches=0,
+                        requires_clarification=False,
+                    )
+
+            # 4. Fresh query: Route via QueryInterpreter and Phase 3B logic
             parsed_intent: ParsedUserIntent = self.query_interpreter.interpret(request.message)
 
 
@@ -242,6 +290,9 @@ class ChatOrchestrator:
         """Handles inventory search according to readiness state and updates session state."""
         if parsed_intent.readiness_state == SearchReadinessState.READY:
             if parsed_intent.query_filters:
+                session = self.memory_service.get_or_create_session(user_id, session_id)
+                session.pending_supported_search = None
+                self.memory_service.save_session(session)
                 car_filter = parsed_intent.query_filters.to_car_filter()
                 self.persistent_memory.update_last_search(user_id, parsed_intent.query_filters)
                 raw_results = self.inventory_service.search(car_filter)
@@ -323,6 +374,13 @@ class ChatOrchestrator:
             )
 
         elif parsed_intent.readiness_state == SearchReadinessState.UNSUPPORTED_CONSTRAINTS_PRESENT:
+            if parsed_intent.query_filters and self._has_searchable_criteria(parsed_intent.query_filters):
+                session = self.memory_service.get_or_create_session(user_id, session_id)
+                session.pending_supported_search = PendingSupportedSearch(
+                    query_filters=parsed_intent.query_filters,
+                    unsupported_constraints=parsed_intent.unsupported_constraints,
+                )
+                self.memory_service.save_session(session)
             response_text = GroundedResponseBuilder.format_unsupported_constraints_response(
                 parsed_intent.unsupported_constraints,
                 parsed_intent.query_filters
@@ -1438,6 +1496,17 @@ class ChatOrchestrator:
         )
 
     @staticmethod
+    def _supported_search_confirmation(message: str) -> Optional[bool]:
+        """Classifies only explicit standalone replies to a pending supported search."""
+        normalized = re.sub(r"[^a-z\s]", "", message.strip().lower())
+        normalized = re.sub(r"\s+", " ", normalized)
+        if normalized in {"yes", "yes please", "sure", "okay", "ok", "go ahead"}:
+            return True
+        if normalized in {"no", "no thanks", "never mind", "nevermind", "cancel"}:
+            return False
+        return None
+
+    @staticmethod
     def _has_searchable_criteria(query_filters) -> bool:
         """Returns True if any meaningful filter is set on the query."""
         fields = [
@@ -1456,5 +1525,3 @@ class ChatOrchestrator:
             query_filters.keywords,
         ]
         return any(f is not None for f in fields)
-
-

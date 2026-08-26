@@ -6,7 +6,11 @@ from enum import Enum
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from backend.models.car import CarListing
-from backend.models.intent import UserIntentEnum
+from backend.models.intent import (
+    ParsedInventoryQuery,
+    UnsupportedConstraint,
+    UserIntentEnum,
+)
 from backend.models.booking import BookingDraft
 from backend.models.lead import LeadDraft
 
@@ -46,6 +50,11 @@ class ConversationTurn(BaseModel):
     matched_listing_ids: List[int] = Field(default_factory=list)
     referenced_listing_id: Optional[int] = None
 
+class PendingSupportedSearch(BaseModel):
+    """Supported filters awaiting consent after unsupported constraints were rejected."""
+    query_filters: ParsedInventoryQuery
+    unsupported_constraints: List[UnsupportedConstraint] = Field(default_factory=list)
+
 class SessionState(BaseModel):
     """Maintains in-memory short-term conversational context for an active session."""
     session_id: str
@@ -55,5 +64,6 @@ class SessionState(BaseModel):
     turns: List[ConversationTurn] = Field(default_factory=list)
     current_result_set: List[CarListing] = Field(default_factory=list)
     active_listing_id: Optional[int] = None
+    pending_supported_search: Optional[PendingSupportedSearch] = None
     pending_booking: Optional[BookingDraft] = None
     pending_lead: Optional[LeadDraft] = None

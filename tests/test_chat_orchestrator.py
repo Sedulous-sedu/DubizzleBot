@@ -194,6 +194,22 @@ def test_orchestrator_zero_matches_no_hallucination(mock_interpreter, real_inven
 # 3. CLARIFICATION & UNSUPPORTED CONSTRAINTS
 # ==============================================================================
 
+def _unsupported_toyota_ranking_intent():
+    return ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Toyota"),
+        requires_clarification=False,
+        clarification_question=None,
+        unsupported_constraints=[
+            UnsupportedConstraint(
+                field="ranking",
+                requested_value="cheapest",
+                reason="ranking_not_supported_by_inventory_filter",
+            )
+        ],
+        readiness_state=SearchReadinessState.UNSUPPORTED_CONSTRAINTS_PRESENT,
+    )
+
 def test_orchestrator_clarification_required_no_inventory_search(mock_interpreter):
     """Test vague request returns clarification question without querying inventory."""
     mock_inventory = MagicMock()
@@ -248,6 +264,186 @@ def test_orchestrator_unsupported_ranking_no_partial_search(mock_interpreter):
     assert "Listing ID" not in res.response
     assert "readiness_state" not in res.response
     assert "unsupported_constraints" not in res.response
+    pending = orchestrator.memory_service.get_session("user_1", res.session_id).pending_supported_search
+    assert pending is not None
+    assert pending.query_filters.make == "Bentley"
+    assert pending.unsupported_constraints[0].field == "ranking"
+
+def test_pending_unsupported_search_confirmation_executes_supported_filters_only(
+    mock_interpreter, real_inventory
+):
+    """An affirmative continuation deterministically runs only the saved Toyota filter."""
+    inventory_spy = MagicMock(wraps=real_inventory)
+    mock_interpreter.interpret.return_value = _unsupported_toyota_ranking_intent()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=inventory_spy,
+    )
+    session_id = str(uuid.uuid4())
+
+    first = orchestrator.process_chat(ChatRequest(
+        user_id="toyota_yes_user",
+        session_id=session_id,
+        message="What is the cheapest Toyota?",
+    ))
+    assert first.total_matches == 0
+    inventory_spy.search.assert_not_called()
+
+    second = orchestrator.process_chat(ChatRequest(
+        user_id="toyota_yes_user",
+        session_id=session_id,
+        message="yes",
+    ))
+
+    assert second.total_matches > 0
+    assert second.matched_cars is not None
+    assert all(car.make.lower() == "toyota" for car in second.matched_cars)
+    search_filter = inventory_spy.search.call_args.args[0]
+    assert search_filter.make == "Toyota"
+    assert search_filter.limit is None
+    assert orchestrator.memory_service.get_session(
+        "toyota_yes_user", session_id
+    ).pending_supported_search is None
+    mock_interpreter.interpret.assert_called_once_with("What is the cheapest Toyota?")
+
+def test_yes_please_executes_pending_supported_search(mock_interpreter, real_inventory):
+    """The polite affirmative variant consumes the pending search."""
+    inventory_spy = MagicMock(wraps=real_inventory)
+    mock_interpreter.interpret.return_value = _unsupported_toyota_ranking_intent()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=inventory_spy,
+    )
+    session_id = str(uuid.uuid4())
+    orchestrator.process_chat(ChatRequest(
+        user_id="toyota_yes_please_user",
+        session_id=session_id,
+        message="What is the cheapest Toyota?",
+    ))
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id="toyota_yes_please_user",
+        session_id=session_id,
+        message="yes please",
+    ))
+
+    assert result.total_matches > 0
+    assert all(car.make.lower() == "toyota" for car in result.matched_cars or [])
+    inventory_spy.search.assert_called_once()
+    assert mock_interpreter.interpret.call_count == 1
+
+def test_no_thanks_clears_pending_supported_search_without_search(mock_interpreter):
+    """A negative continuation clears pending state without inventory retrieval."""
+    mock_inventory = MagicMock()
+    mock_interpreter.interpret.return_value = _unsupported_toyota_ranking_intent()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=mock_inventory,
+    )
+    session_id = str(uuid.uuid4())
+    orchestrator.process_chat(ChatRequest(
+        user_id="toyota_no_user",
+        session_id=session_id,
+        message="What is the cheapest Toyota?",
+    ))
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id="toyota_no_user",
+        session_id=session_id,
+        message="No thanks",
+    ))
+
+    assert result.total_matches == 0
+    assert result.matched_cars is None
+    assert "won't run" in result.response
+    mock_inventory.search.assert_not_called()
+    assert orchestrator.memory_service.get_session(
+        "toyota_no_user", session_id
+    ).pending_supported_search is None
+
+def test_unrelated_memory_recall_is_not_swallowed_by_pending_search(mock_interpreter):
+    """Phase 4B memory recall retains priority and leaves the pending search available."""
+    mock_inventory = MagicMock()
+    mock_persistent_memory = MagicMock()
+    mock_persistent_memory.get_liked_listing_ids.return_value = []
+    mock_interpreter.interpret.return_value = _unsupported_toyota_ranking_intent()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=mock_inventory,
+        persistent_memory=mock_persistent_memory,
+    )
+    session_id = str(uuid.uuid4())
+    orchestrator.process_chat(ChatRequest(
+        user_id="memory_priority_user",
+        session_id=session_id,
+        message="What is the cheapest Toyota?",
+    ))
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id="memory_priority_user",
+        session_id=session_id,
+        message="What cars did I like?",
+    ))
+
+    assert result.intent == UserIntentEnum.INVENTORY_SEARCH
+    assert result.total_matches == 0
+    mock_persistent_memory.get_liked_listing_ids.assert_called_once_with("memory_priority_user")
+    assert mock_interpreter.interpret.call_count == 1
+    assert orchestrator.memory_service.get_session(
+        "memory_priority_user", session_id
+    ).pending_supported_search is not None
+
+def test_normal_toyota_search_remains_unchanged(mock_interpreter, real_inventory):
+    """A normal supported Toyota query follows the existing deterministic path."""
+    mock_interpreter.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Toyota"),
+        requires_clarification=False,
+        clarification_question=None,
+        unsupported_constraints=[],
+        readiness_state=SearchReadinessState.READY,
+    )
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=real_inventory,
+    )
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id="normal_toyota_user",
+        message="Show me Toyotas",
+    ))
+
+    assert result.total_matches > 0
+    assert result.matched_cars is not None
+    assert all(car.make.lower() == "toyota" for car in result.matched_cars)
+
+@pytest.mark.parametrize("reply", ["sure", "okay", "go ahead"])
+def test_other_explicit_affirmatives_execute_pending_search(
+    reply, mock_interpreter, real_inventory
+):
+    """Documented standalone affirmative variants consume pending state."""
+    inventory_spy = MagicMock(wraps=real_inventory)
+    mock_interpreter.interpret.return_value = _unsupported_toyota_ranking_intent()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interpreter,
+        inventory_service=inventory_spy,
+    )
+    session_id = str(uuid.uuid4())
+    orchestrator.process_chat(ChatRequest(
+        user_id=f"affirmative_{reply}",
+        session_id=session_id,
+        message="What is the cheapest Toyota?",
+    ))
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id=f"affirmative_{reply}",
+        session_id=session_id,
+        message=reply,
+    ))
+
+    assert result.total_matches > 0
+    inventory_spy.search.assert_called_once()
+    assert mock_interpreter.interpret.call_count == 1
 
 # ==============================================================================
 # 4. VIEWING INTENT & READINESS ROUTING
@@ -717,6 +913,4 @@ def test_orchestrator_pronoun_with_no_context_returns_clarification(real_invento
     res3 = orchestrator.process_chat(req3)
     assert res3.requires_clarification is True
     assert mock_interp.interpret.call_count == 0
-
-
 
