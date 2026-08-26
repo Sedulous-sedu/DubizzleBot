@@ -165,4 +165,63 @@ def test_chat_endpoint_multi_turn_land_rover_assessment_demo(client, mock_api_ch
     if first_car["warranty_status"]:
         assert first_car["warranty_status"] in data3["response"]
 
+def test_chat_endpoint_multi_session_persistent_memory_flow(client, mock_api_chat_interpreter):
+    """
+    Assessment demo flow via POST /chat across DIFFERENT sessions:
+    Session 1: 'Show me Bentleys' -> 'I like the second one' (saves Listing #17).
+    Session 2 (same user_id, new session_id): 'What cars did I like?' -> returns Listing #17 without LLM call!
+    """
+    from backend.models.intent import ParsedInventoryQuery
+
+    mock_api_chat_interpreter.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Bentley"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+
+    user_id = "returning_api_user"
+    session_1 = "session_api_1"
+
+    # Turn 1: Search Bentleys
+    res1 = client.post("/chat", json={"user_id": user_id, "message": "Show me Bentleys", "session_id": session_1})
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["total_matches"] == 7
+    second_bentley = data1["matched_cars"][1]
+    assert mock_api_chat_interpreter.interpret.call_count == 1
+
+    # Turn 2: Like second car
+    res2 = client.post("/chat", json={"user_id": user_id, "message": "I like the second one", "session_id": session_1})
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["total_matches"] == 1
+    assert data2["matched_cars"][0]["listing_id"] == second_bentley["listing_id"]
+    assert f"Listing #{second_bentley['listing_id']}" in data2["response"]
+
+    # Session 2: New session ID!
+    session_2 = "session_api_2"
+    res3 = client.post("/chat", json={"user_id": user_id, "message": "What cars did I like?", "session_id": session_2})
+    assert res3.status_code == 200
+    data3 = res3.json()
+    assert data3["session_id"] == session_2
+    assert data3["total_matches"] == 1
+    assert data3["matched_cars"][0]["listing_id"] == second_bentley["listing_id"]
+    assert mock_api_chat_interpreter.interpret.call_count == 1  # 0 LLM calls for recall!
+
+    # Turn 4: Save explicit budget preference
+    res4 = client.post("/chat", json={"user_id": user_id, "message": "My budget is now AED 150,000", "session_id": session_2})
+    assert res4.status_code == 200
+    data4 = res4.json()
+    assert "AED 150,000" in data4["response"]
+
+    # Turn 5: Ask what is remembered
+    res5 = client.post("/chat", json={"user_id": user_id, "message": "What do you remember about me?", "session_id": session_2})
+    assert res5.status_code == 200
+    data5 = res5.json()
+    assert "AED 150,000" in data5["response"]
+    assert "Bentley" in data5["response"]
+    assert "1 vehicle in your favorites" in data5["response"]
+
+
 

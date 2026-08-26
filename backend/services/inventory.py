@@ -535,3 +535,38 @@ class InventoryService:
             "warranty_counts": {str(k) if pd.notnull(k) else "Unspecified": int(v) for k, v in self._df['warranty_status'].value_counts(dropna=False).items()},
             "body_type_counts": {str(k) if pd.notnull(k) else "Unspecified": int(v) for k, v in self._df['body_type'].value_counts(dropna=False).items()},
         }
+
+    def get_by_listing_id(self, listing_id: int) -> Optional[CarListing]:
+        """Direct, read-only lookup of a single CarListing by Listing_ID from the loaded dataset."""
+        if self._df is None or self._df.empty:
+            return None
+        try:
+            target_id = int(listing_id)
+        except (ValueError, TypeError):
+            return None
+
+        matches = self._df[self._df['Listing_ID'] == target_id]
+        if matches.empty:
+            return None
+
+        row = matches.iloc[0]
+        rec = {
+            "listing_id": int(row['Listing_ID']),
+            "year": int(row['year']),
+            "make": str(row['make']),
+            "model": str(row['model']),
+            "trim": str(row['trim']),
+            "title": str(row['title']),
+            "description": str(row['description']),
+            "photo_url": str(row['photo_url']),
+            "price_aed": float(row['price_aed']) if pd.notnull(row['price_aed']) else None,
+            "monthly_payment_aed": float(row['monthly_payment_aed']) if pd.notnull(row['monthly_payment_aed']) else None,
+            "mileage_km": int(row['mileage_km']) if pd.notnull(row['mileage_km']) else None,
+            "regional_specs": str(row['regional_specs']) if pd.notnull(row['regional_specs']) else None,
+            "has_positive_warranty": bool(row['has_positive_warranty']) if pd.notnull(row['has_positive_warranty']) else None,
+            "warranty_status": str(row['warranty_status']) if pd.notnull(row['warranty_status']) else None,
+            "body_type": str(row['body_type']) if pd.notnull(row['body_type']) else None,
+            "provenance": row['provenance']
+        }
+        return CarListing.model_validate(rec)
+

@@ -248,3 +248,190 @@ class GroundedResponseBuilder:
             "I am DubizzleBot, specialized in helping you find cars and arrange viewings from our verified UAE inventory. "
             "I cannot assist with non-automotive topics, but I would be glad to help you find a car!"
         )
+
+    # =========================================================================
+    # PHASE 4B: LONG-TERM PERSISTENT MEMORY FORMATTERS
+    # =========================================================================
+
+    @classmethod
+    def format_saved_car_confirmation(cls, item: Union[CarListing, Dict[str, Any]]) -> str:
+        """Formats factual confirmation when a car is saved to favorites."""
+        listing = cls._to_car_listing(item)
+        model_str = f" {listing.model}" if listing.model else ""
+        return f"I've saved the {listing.year} {listing.make}{model_str} (Listing #{listing.listing_id}) to your favorites."
+
+    @classmethod
+    def format_removed_car_confirmation(cls, listing_id: int, item: Optional[Union[CarListing, Dict[str, Any]]] = None) -> str:
+        """Formats confirmation when a car is removed from favorites."""
+        if item:
+            listing = cls._to_car_listing(item)
+            model_str = f" {listing.model}" if listing.model else ""
+            return f"I've removed the {listing.year} {listing.make}{model_str} (Listing #{listing_id}) from your favorites."
+        return f"I've removed Listing #{listing_id} from your favorites."
+
+    @classmethod
+    def format_liked_cars_response(
+        cls,
+        saved_cars: List[Union[CarListing, Dict[str, Any]]],
+        missing_ids: Optional[List[int]] = None
+    ) -> str:
+        """Formats verified saved vehicles from inventory rehydration."""
+        missing = missing_ids or []
+        if not saved_cars and not missing:
+            return (
+                "You don't have any saved cars in your favorites yet. "
+                "You can save any car from your search results by saying 'Save this car' or 'I like the first one'."
+            )
+
+        lines = []
+        if saved_cars:
+            count = len(saved_cars)
+            if count == 1:
+                lines.append("You have 1 saved vehicle in your favorites:")
+            else:
+                lines.append(f"You have {count} saved vehicles in your favorites:")
+
+            for car in saved_cars:
+                lines.append(cls._format_listing_line(car))
+
+        if missing:
+            missing_str = ", ".join(f"#{i}" for i in missing)
+            lines.append(f"Note: Saved Listing {missing_str} is no longer available in our active inventory.")
+
+        return "\n\n".join(lines)
+
+    @classmethod
+    def format_preferences_summary_response(
+        cls,
+        prefs: Optional[Any],
+        liked_count: int = 0
+    ) -> str:
+        """Formats a transparent summary clearly distinguishing explicit preferences from last search criteria."""
+        has_prefs = prefs is not None and prefs.has_explicit_preferences()
+        has_last_search = prefs is not None and prefs.last_search_filters is not None
+        has_likes = liked_count > 0
+
+        if not has_prefs and not has_last_search and not has_likes:
+            return (
+                "I don't have any saved preferences or search history for you yet. "
+                "You can tell me your preferences like 'I prefer GCC cars' or 'My budget is AED 100,000', "
+                "or save vehicles by saying 'Save this car'."
+            )
+
+        sections = ["Here is what I remember about you:"]
+
+        # 1. Explicit Preferences
+        if has_prefs:
+            pref_items = []
+            if prefs.preferred_make:
+                pref_items.append(f"Make: {prefs.preferred_make}")
+            if prefs.preferred_model:
+                pref_items.append(f"Model: {prefs.preferred_model}")
+            if prefs.min_year and prefs.max_year:
+                pref_items.append(f"Year: {prefs.min_year} - {prefs.max_year}")
+            elif prefs.min_year:
+                pref_items.append(f"Year: from {prefs.min_year}")
+            elif prefs.max_year:
+                pref_items.append(f"Year: up to {prefs.max_year}")
+
+            if prefs.min_price_aed and prefs.max_price_aed:
+                pref_items.append(f"Budget: AED {prefs.min_price_aed:,.0f} - AED {prefs.max_price_aed:,.0f}")
+            elif prefs.max_price_aed:
+                pref_items.append(f"Budget: up to AED {prefs.max_price_aed:,.0f}")
+            elif prefs.min_price_aed:
+                pref_items.append(f"Budget: from AED {prefs.min_price_aed:,.0f}")
+
+            if prefs.max_mileage_km:
+                pref_items.append(f"Mileage: under {prefs.max_mileage_km:,} km")
+            if prefs.regional_specs:
+                pref_items.append(f"Regional Specs: {prefs.regional_specs.upper()}")
+            if prefs.warranty_preference is True:
+                pref_items.append("Warranty: Preferred / Required")
+            elif prefs.warranty_preference is False:
+                pref_items.append("Warranty: Not required")
+            if prefs.keywords:
+                pref_items.append(f"Keywords: {prefs.keywords}")
+
+            pref_str = "\n".join(f"  • {item}" for item in pref_items)
+            sections.append(f"Saved Preferences:\n{pref_str}")
+
+        # 2. Most Recent Search (Clearly labeled as history)
+        if has_last_search:
+            ls = prefs.last_search_filters
+            ls_parts = []
+            if ls.make:
+                ls_parts.append(ls.make)
+            if ls.model:
+                ls_parts.append(ls.model)
+            if ls.min_year and ls.max_year:
+                ls_parts.append(f"({ls.min_year}-{ls.max_year})")
+            elif ls.min_year:
+                ls_parts.append(f"(from {ls.min_year})")
+            elif ls.max_year:
+                ls_parts.append(f"(up to {ls.max_year})")
+            if ls.max_price_aed:
+                ls_parts.append(f"under AED {ls.max_price_aed:,.0f}")
+            if ls.regional_specs:
+                ls_parts.append(f"{ls.regional_specs} specs")
+            if ls.warranty is True:
+                ls_parts.append("with warranty")
+
+            summary_query = " ".join(ls_parts) if ls_parts else "general search"
+            sections.append(f"Most Recent Search:\n  • {summary_query}")
+
+        # 3. Saved Favorites Count
+        if has_likes:
+            car_word = "vehicle" if liked_count == 1 else "vehicles"
+            sections.append(f"Saved Favorites:\n  • {liked_count} {car_word} in your favorites")
+
+        return "\n\n".join(sections)
+
+    @classmethod
+    def format_preference_saved_confirmation(cls, prefs: Any) -> str:
+        """Formats confirmation when user preferences are updated."""
+        pref_items = []
+        if prefs.preferred_make:
+            pref_items.append(f"Make: {prefs.preferred_make}")
+        if prefs.preferred_model:
+            pref_items.append(f"Model: {prefs.preferred_model}")
+        if prefs.min_year and prefs.max_year:
+            pref_items.append(f"Year: {prefs.min_year} - {prefs.max_year}")
+        elif prefs.min_year:
+            pref_items.append(f"Year: from {prefs.min_year}")
+        elif prefs.max_year:
+            pref_items.append(f"Year: up to {prefs.max_year}")
+
+        if prefs.min_price_aed and prefs.max_price_aed:
+            pref_items.append(f"Budget: AED {prefs.min_price_aed:,.0f} - AED {prefs.max_price_aed:,.0f}")
+        elif prefs.max_price_aed:
+            pref_items.append(f"Budget: up to AED {prefs.max_price_aed:,.0f}")
+        elif prefs.min_price_aed:
+            pref_items.append(f"Budget: from AED {prefs.min_price_aed:,.0f}")
+
+        if prefs.max_mileage_km:
+            pref_items.append(f"Mileage: under {prefs.max_mileage_km:,} km")
+        if prefs.regional_specs:
+            pref_items.append(f"Regional Specs: {prefs.regional_specs.upper()}")
+        if prefs.warranty_preference is True:
+            pref_items.append("Warranty: Preferred")
+        elif prefs.warranty_preference is False:
+            pref_items.append("Warranty: Not required")
+        if prefs.keywords:
+            pref_items.append(f"Keywords: {prefs.keywords}")
+
+        if pref_items:
+            pref_str = "\n".join(f"• {item}" for item in pref_items)
+            return f"I've updated your saved preferences:\n\n{pref_str}"
+        return "I've updated your saved preferences."
+
+    @staticmethod
+    def format_clear_confirmation(target: str) -> str:
+        """Formats confirmation when memory or preferences are cleared."""
+        if target == "preferences":
+            return "I've cleared your saved preferences."
+        elif target == "liked_cars":
+            return "I've cleared all your saved favorites."
+        elif target == "all":
+            return "I've cleared all your profile data, saved preferences, and favorites."
+        return "I've updated your saved memory."
+
