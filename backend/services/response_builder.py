@@ -7,6 +7,7 @@ from backend.models.intent import (
     ParsedInventoryQuery,
     UnsupportedConstraint,
 )
+from backend.models.memory import TargetAttribute
 
 KNOWN_COMPETITORS = [
     "yallamotor", "carswitch", "kavak", "cars24", "opensooq", "seez",
@@ -91,6 +92,61 @@ class GroundedResponseBuilder:
             lines.append(cls._format_listing_line(listing))
 
         return "\n\n".join(lines)
+
+    @classmethod
+    def format_vehicle_attribute_response(
+        cls,
+        item: Union[CarListing, Dict[str, Any]],
+        target_attribute: TargetAttribute
+    ) -> str:
+        """Deterministically formats an answer for a specific attribute of a resolved vehicle."""
+        car = cls._to_car_listing(item)
+        car_name = f"{car.year} {car.make} {car.model}"
+        car_ref = f"{car_name} (Listing #{car.listing_id})"
+
+        if target_attribute == TargetAttribute.MILEAGE:
+            if car.mileage_km is not None:
+                return f"The {car_ref} has {car.mileage_km:,} km on the odometer."
+            return f"The mileage is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.WARRANTY:
+            if car.warranty_status:
+                if car.warranty_status.lower() == "under warranty" or car.has_positive_warranty is True:
+                    return f"Yes, the {car_ref} is listed with warranty status: {car.warranty_status}."
+                return f"The {car_ref} has warranty status: {car.warranty_status}."
+            elif car.has_positive_warranty is False:
+                return f"The {car_ref} does not have an active warranty."
+            return f"The warranty status is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.PRICE:
+            if car.price_aed is not None:
+                return f"The cash price for the {car_ref} is AED {car.price_aed:,.0f}."
+            return f"The price is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.MONTHLY_PAYMENT:
+            if car.monthly_payment_aed is not None:
+                return f"The estimated installment for the {car_ref} is AED {car.monthly_payment_aed:,.0f} per month."
+            return f"A monthly installment estimate is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.REGIONAL_SPECS:
+            if car.regional_specs:
+                return f"The regional specification for the {car_ref} is {car.regional_specs}."
+            return f"The regional specification is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.YEAR:
+            return f"The {car.make} {car.model} (Listing #{car.listing_id}) is a {car.year} model."
+
+        elif target_attribute == TargetAttribute.BODY_TYPE:
+            if car.body_type:
+                return f"The body type for the {car_ref} is {car.body_type}."
+            return f"The body type is not stated in the listing for the {car_ref}."
+
+        elif target_attribute == TargetAttribute.MAKE_MODEL_TRIM:
+            trim_str = f" {car.trim}" if car.trim and car.trim.lower() != "nan" else ""
+            return f"This vehicle is a {car.year} {car.make} {car.model}{trim_str} (Listing #{car.listing_id})."
+
+        else:  # ALL_DETAILS
+            return f"Here are the details for the {car_ref}:\n\n{cls._format_listing_line(car)}"
 
     @staticmethod
     def format_clarification_response(clarification_question: Optional[str]) -> str:

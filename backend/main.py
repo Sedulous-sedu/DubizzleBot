@@ -9,6 +9,7 @@ from backend.models.car import CarFilter, CarListing
 from backend.models.chat import ChatRequest, ChatResponse
 from backend.models.intent import UserIntentEnum
 from backend.services.inventory import InventoryService
+from backend.services.memory import MemoryService
 from backend.services.orchestrator import ChatOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,11 @@ app = FastAPI(
 )
 
 inventory_service = InventoryService()
-chat_orchestrator = ChatOrchestrator(inventory_service=inventory_service)
+memory_service = MemoryService()
+chat_orchestrator = ChatOrchestrator(
+    inventory_service=inventory_service,
+    memory_service=memory_service
+)
 
 @app.get("/health")
 async def health_check():

@@ -242,10 +242,10 @@ def test_interpret_malformed_llm_output_fallback():
 def test_interpret_prompt_injection_rejection():
     """Verify injected schema fields (e.g. listing_id) are rejected by extra='forbid'."""
     with pytest.raises(ValidationError):
-        ParsedInventoryQuery(
-            make="Bentley",
-            listing_id=38  # Extra forbidden attribute
-        )
+        ParsedInventoryQuery.model_validate({
+            "make": "Bentley",
+            "listing_id": 38  # Extra forbidden attribute
+        })
 
 def test_interpret_year_range_ferrari():
     """Verify 'Show me Ferraris from 2000 to 2005' extracts make=Ferrari, min_year=2000, max_year=2005."""

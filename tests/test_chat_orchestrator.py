@@ -521,3 +521,202 @@ def test_grounded_response_builder_missing_attributes_invariant():
     assert "Monthly:" not in formatted
     assert "Warranty:" not in formatted
     assert "Body:" not in formatted
+
+# ==============================================================================
+# 8. PHASE 4A MULTI-TURN SESSION MEMORY & CONTEXTUAL VEHICLE RESOLUTION
+# ==============================================================================
+
+def test_orchestrator_multi_turn_land_rover_flow_with_spy(real_inventory):
+    """
+    Assessment demo flow:
+    Turn 1: 'Show me Land Rovers' -> calls interpreter, returns real Land Rovers.
+    Turn 2: 'What's the mileage on that first Land Rover?' -> does NOT call interpreter, returns mileage of first Land Rover.
+    Turn 3: 'Is there a warranty on it?' -> does NOT call interpreter, returns warranty of SAME Land Rover.
+    """
+    mock_interp = MagicMock()
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Land Rover"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    session_id = str(uuid.uuid4())
+
+    # Turn 1: Search Land Rovers
+    req1 = ChatRequest(user_id="user_1", message="Show me Land Rovers", session_id=session_id)
+    res1 = orchestrator.process_chat(req1)
+    assert res1.total_matches > 0
+    assert len(res1.matched_cars) > 0
+    first_car: CarListing = res1.matched_cars[0]
+    assert first_car.make.lower() == "land rover"
+    assert mock_interp.interpret.call_count == 1
+
+    # Turn 2: Follow-up on first Land Rover's mileage
+    req2 = ChatRequest(user_id="user_1", message="What's the mileage on that first Land Rover?", session_id=session_id)
+    res2 = orchestrator.process_chat(req2)
+    assert mock_interp.interpret.call_count == 1  # Spy confirms QueryInterpreter was NOT called!
+    assert res2.total_matches == 1
+    assert res2.matched_cars[0].listing_id == first_car.listing_id
+    if first_car.mileage_km is not None:
+        assert f"{first_car.mileage_km:,} km" in res2.response
+    else:
+        assert "mileage is not stated" in res2.response
+
+    # Turn 3: Follow-up on warranty using pronoun 'it'
+    req3 = ChatRequest(user_id="user_1", message="Is there a warranty on it?", session_id=session_id)
+    res3 = orchestrator.process_chat(req3)
+    assert mock_interp.interpret.call_count == 1  # Spy confirms QueryInterpreter was STILL not called!
+    assert res3.total_matches == 1
+    assert res3.matched_cars[0].listing_id == first_car.listing_id
+    if first_car.warranty_status:
+        assert first_car.warranty_status in res3.response
+
+def test_orchestrator_result_set_replacement_on_new_search(real_inventory):
+    """Verify fresh searches replace the current result set and reset the active vehicle."""
+    mock_interp = MagicMock()
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    session_id = str(uuid.uuid4())
+
+    # Turn 1: Search Land Rovers
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Land Rover"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    res1 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="Show me Land Rovers", session_id=session_id))
+    first_lr = res1.matched_cars[0]
+
+    # Turn 2: Search Bentleys
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Bentley"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    res2 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="Show me Bentleys", session_id=session_id))
+    first_bentley = res2.matched_cars[0]
+    assert first_bentley.make.lower() == "bentley"
+
+    # Turn 3: "What's the price of the first one?" -> Should resolve to first Bentley, not Land Rover
+    res3 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="What's the price of the first one?", session_id=session_id))
+    assert res3.total_matches == 1
+    assert res3.matched_cars[0].listing_id == first_bentley.listing_id
+    assert res3.matched_cars[0].listing_id != first_lr.listing_id
+
+def test_orchestrator_zero_result_clears_context(real_inventory):
+    """Verify zero-match search clears prior results so old results are not referenced."""
+    mock_interp = MagicMock()
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    session_id = str(uuid.uuid4())
+
+    # Turn 1: Search Land Rovers (matches found)
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Land Rover"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    orchestrator.process_chat(ChatRequest(user_id="user_1", message="Show me Land Rovers", session_id=session_id))
+    assert mock_interp.interpret.call_count == 1
+
+    # Turn 2: Search impossible Ferrari (0 matches)
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Ferrari", min_year=1950, max_year=1960),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    res2 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="Show me 1950 Ferraris", session_id=session_id))
+    assert res2.total_matches == 0
+    assert mock_interp.interpret.call_count == 2
+
+    # Turn 3: Follow-up -> Result set is empty, so it returns clarification without calling interpreter
+    res3 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="What's the mileage on that first Land Rover?", session_id=session_id))
+    assert res3.requires_clarification is True
+    assert "no Land Rover vehicles in your current search results" in res3.response
+    assert mock_interp.interpret.call_count == 2  # Proves interpreter is NOT called for referential query with no context
+
+def test_orchestrator_general_chat_preserves_context(real_inventory):
+    """Verify greeting and general chat do not erase current search results."""
+    mock_interp = MagicMock()
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    session_id = str(uuid.uuid4())
+
+    # Turn 1: Search Land Rovers
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Land Rover"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    res1 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="Show me Land Rovers", session_id=session_id))
+    first_lr = res1.matched_cars[0]
+
+    # Turn 2: General chat
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.GENERAL_CHAT,
+        query_filters=None,
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.NON_INVENTORY_INTENT
+    )
+    res2 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="Hello there!", session_id=session_id))
+    assert res2.intent == UserIntentEnum.GENERAL_CHAT
+
+    # Turn 3: Follow-up on first Land Rover -> Context preserved
+    res3 = orchestrator.process_chat(ChatRequest(user_id="user_1", message="What's the mileage on that first Land Rover?", session_id=session_id))
+    assert res3.total_matches == 1
+    assert res3.matched_cars[0].listing_id == first_lr.listing_id
+
+def test_orchestrator_cross_user_isolation(real_inventory):
+    """Verify same session_id across different user_ids does not leak context."""
+    mock_interp = MagicMock()
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    shared_session = "shared_sess_uuid"
+
+    # Alice searches Land Rovers
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Land Rover"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    orchestrator.process_chat(ChatRequest(user_id="alice", message="Show me Land Rovers", session_id=shared_session))
+    assert mock_interp.interpret.call_count == 1
+
+    # Bob asks about first Land Rover in shared_session without having searched
+    res_bob = orchestrator.process_chat(ChatRequest(user_id="bob", message="What's the mileage on that first Land Rover?", session_id=shared_session))
+    # Proves Bob does NOT get Alice's Land Rover (returns clarification since Bob has 0 Land Rovers)
+    assert res_bob.requires_clarification is True
+    assert "no Land Rover vehicles in your current search results" in res_bob.response
+    assert mock_interp.interpret.call_count == 1
+
+def test_orchestrator_pronoun_with_no_context_returns_clarification(real_inventory):
+    """Verify pronoun on fresh session returns clarification and does NOT call QueryInterpreter."""
+    mock_interp = MagicMock()
+    orchestrator = ChatOrchestrator(query_interpreter=mock_interp, inventory_service=real_inventory)
+    session_id = str(uuid.uuid4())
+
+    req = ChatRequest(user_id="user_fresh", message="Does it have a warranty?", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert res.requires_clarification is True
+    assert "Which vehicle are you referring to?" in res.response
+    assert res.matched_cars is None
+    assert res.total_matches == 0
+    assert mock_interp.interpret.call_count == 0, "QueryInterpreter should NOT be called for referential pronoun queries"
+
+    req2 = ChatRequest(user_id="user_fresh", message="What's its mileage?", session_id=session_id)
+    res2 = orchestrator.process_chat(req2)
+    assert res2.requires_clarification is True
+    assert mock_interp.interpret.call_count == 0
+
+    req3 = ChatRequest(user_id="user_fresh", message="How much is it?", session_id=session_id)
+    res3 = orchestrator.process_chat(req3)
+    assert res3.requires_clarification is True
+    assert mock_interp.interpret.call_count == 0
+
+
+
