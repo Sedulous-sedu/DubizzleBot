@@ -64,6 +64,26 @@ def sample_cars():
         ),
     ]
 
+@pytest.fixture
+def active_bentley_session(sample_cars):
+    """Provides multiple visible results with Listing #17 as the active vehicle."""
+    bentley = CarListing(
+        listing_id=17,
+        make="bentley",
+        model="continental",
+        trim="gtc mulliner",
+        year=2020,
+        title="2020 Bentley Continental GTC Mulliner",
+        description="Verified Bentley listing",
+        mileage_km=318,
+    )
+    return SessionState(
+        session_id="active_bentley_session",
+        user_id="active_bentley_user",
+        current_result_set=[sample_cars[0], bentley, sample_cars[1]],
+        active_listing_id=17,
+    )
+
 # =============================================================================
 # MemoryService Tests
 # =============================================================================
@@ -294,3 +314,66 @@ def test_context_resolver_pronoun_with_no_context_clarification():
         assert res.status == ResolutionStatus.CLARIFICATION_REQUIRED, f"Query '{query}' should require clarification"
         assert res.resolved_car is None
         assert "Which vehicle are you referring to?" in res.clarification_message
+
+@pytest.mark.parametrize(
+    ("query", "expected_attribute"),
+    [
+        ("What all details do you have for that?", TargetAttribute.ALL_DETAILS),
+        ("Which year is that?", TargetAttribute.YEAR),
+        ("How much is that?", TargetAttribute.PRICE),
+        ("What's the mileage on that?", TargetAttribute.MILEAGE),
+    ],
+)
+def test_context_resolver_bare_deictic_uses_active_vehicle(
+    active_bentley_session, query, expected_attribute
+):
+    """Bare this/that follow-ups resolve the established active Listing #17."""
+    result = ContextResolver.resolve(query, active_bentley_session)
+
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.resolved_car.listing_id == 17
+    assert result.target_attribute == expected_attribute
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Show me cars that have warranty",
+        "Find Bentleys that are GCC spec",
+        "I want a car that costs under AED 100,000",
+    ],
+)
+def test_bare_deictic_does_not_hijack_fresh_inventory_queries(
+    active_bentley_session, query
+):
+    """Relative-clause uses of that remain fresh inventory queries."""
+    result = ContextResolver.resolve(query, active_bentley_session)
+
+    assert result.status == ResolutionStatus.NOT_CONTEXTUAL
+
+def test_bare_deictic_without_vehicle_context_requires_clarification():
+    """A bare deictic question never fabricates a vehicle on an empty session."""
+    session = SessionState(session_id="empty", user_id="empty")
+
+    result = ContextResolver.resolve("Which year is that?", session)
+
+    assert result.status == ResolutionStatus.CLARIFICATION_REQUIRED
+    assert result.resolved_car is None
+    assert "Which vehicle are you referring to?" in result.clarification_message
+
+@pytest.mark.parametrize(
+    ("query", "expected_attribute"),
+    [
+        ("What's its mileage?", TargetAttribute.MILEAGE),
+        ("Does it have warranty?", TargetAttribute.WARRANTY),
+        ("Tell me more about that car", TargetAttribute.ALL_DETAILS),
+    ],
+)
+def test_existing_pronoun_forms_remain_unchanged(
+    active_bentley_session, query, expected_attribute
+):
+    """Previously supported qualified pronouns still resolve Listing #17."""
+    result = ContextResolver.resolve(query, active_bentley_session)
+
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.resolved_car.listing_id == 17
+    assert result.target_attribute == expected_attribute

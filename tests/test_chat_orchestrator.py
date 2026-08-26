@@ -16,6 +16,7 @@ from backend.models.intent import (
 from backend.services.orchestrator import ChatOrchestrator
 from backend.services.response_builder import GroundedResponseBuilder
 from backend.services.inventory import InventoryService
+from backend.services.memory import MemoryService
 
 @pytest.fixture
 def real_inventory():
@@ -914,3 +915,33 @@ def test_orchestrator_pronoun_with_no_context_returns_clarification(real_invento
     assert res3.requires_clarification is True
     assert mock_interp.interpret.call_count == 0
 
+def test_orchestrator_bare_deictic_uses_active_vehicle_without_llm_or_search(real_inventory):
+    """A resolved bare-deictic follow-up stays entirely on the deterministic path."""
+    mock_interp = MagicMock()
+    inventory_spy = MagicMock(wraps=real_inventory)
+    memory_service = MemoryService()
+    session_id = str(uuid.uuid4())
+    session = memory_service.get_or_create_session("bare_deictic_user", session_id)
+    session.current_result_set = [
+        real_inventory.get_by_listing_id(9),
+        real_inventory.get_by_listing_id(17),
+    ]
+    session.active_listing_id = 17
+    memory_service.save_session(session)
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=inventory_spy,
+        memory_service=memory_service,
+    )
+
+    result = orchestrator.process_chat(ChatRequest(
+        user_id="bare_deictic_user",
+        session_id=session_id,
+        message="Which year is that?",
+    ))
+
+    assert result.total_matches == 1
+    assert result.matched_cars[0].listing_id == 17
+    assert result.response == "The bentley continental (Listing #17) is a 2020 model."
+    mock_interp.interpret.assert_not_called()
+    inventory_spy.search.assert_not_called()

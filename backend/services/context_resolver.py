@@ -268,7 +268,8 @@ class ContextResolver:
         - "How much is that car?", "Tell me more about this car"
         """
         pronoun_pattern = r"\b(it|its|that\s+car|this\s+car|the\s+car|that\s+vehicle|this\s+vehicle|this\s+one|that\s+one)\b"
-        if not re.search(pronoun_pattern, msg_lower):
+        has_qualified_reference = re.search(pronoun_pattern, msg_lower) is not None
+        if not has_qualified_reference and not cls._is_bare_deictic_follow_up(msg_lower):
             return None
 
         # 1. If active_listing_id exists, look it up in current_result_set
@@ -295,3 +296,13 @@ class ContextResolver:
             None,
             "Which vehicle are you referring to? Please search for a vehicle first or specify the vehicle you would like to know about."
         )
+
+    @staticmethod
+    def _is_bare_deictic_follow_up(msg_lower: str) -> bool:
+        """Recognizes bare this/that only in unambiguous follow-up question shapes."""
+        patterns = [
+            r"\b(?:is|on|about|for)\s+(?:that|this)\s*[?.!]*$",
+            r"\bdoes\s+(?:that|this)\s+have\b",
+            r"^(?:is|does)\s+(?:that|this)\b",
+        ]
+        return any(re.search(pattern, msg_lower) for pattern in patterns)
