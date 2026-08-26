@@ -7,6 +7,8 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from backend.models.car import CarListing
 from backend.models.intent import UserIntentEnum
+from backend.models.booking import BookingDraft
+from backend.models.lead import LeadDraft
 
 class ResolutionStatus(str, Enum):
     """Status indicating how a user message was processed by ContextResolver."""
@@ -53,3 +55,5 @@ class SessionState(BaseModel):
     turns: List[ConversationTurn] = Field(default_factory=list)
     current_result_set: List[CarListing] = Field(default_factory=list)
     active_listing_id: Optional[int] = None
+    pending_booking: Optional[BookingDraft] = None
+    pending_lead: Optional[LeadDraft] = None

@@ -12,6 +12,9 @@ from backend.models.intent import UserIntentEnum
 from backend.services.inventory import InventoryService
 from backend.services.memory import MemoryService
 from backend.services.persistent_memory import PersistentMemoryService
+from backend.services.booking import BookingService
+from backend.services.lead import LeadService
+from backend.services.phase5_resolver import Phase5Resolver
 from backend.services.query_interpreter import QueryInterpreter
 from backend.services.orchestrator import ChatOrchestrator
 
@@ -21,6 +24,8 @@ logger = logging.getLogger(__name__)
 _inventory_service: Optional[InventoryService] = None
 _memory_service: Optional[MemoryService] = None
 _persistent_memory: Optional[PersistentMemoryService] = None
+_booking_service: Optional[BookingService] = None
+_lead_service: Optional[LeadService] = None
 _chat_orchestrator: Optional[ChatOrchestrator] = None
 
 def get_inventory_service() -> InventoryService:
@@ -41,6 +46,18 @@ def get_persistent_memory() -> PersistentMemoryService:
         _persistent_memory = PersistentMemoryService()
     return _persistent_memory
 
+def get_booking_service() -> BookingService:
+    global _booking_service
+    if _booking_service is None:
+        _booking_service = BookingService(persistent_memory=get_persistent_memory())
+    return _booking_service
+
+def get_lead_service() -> LeadService:
+    global _lead_service
+    if _lead_service is None:
+        _lead_service = LeadService()
+    return _lead_service
+
 def get_chat_orchestrator() -> ChatOrchestrator:
     global _chat_orchestrator
     if _chat_orchestrator is None:
@@ -48,6 +65,8 @@ def get_chat_orchestrator() -> ChatOrchestrator:
             inventory_service=get_inventory_service(),
             memory_service=get_memory_service(),
             persistent_memory=get_persistent_memory(),
+            booking_service=get_booking_service(),
+            lead_service=get_lead_service(),
         )
     return _chat_orchestrator
 
@@ -69,14 +88,19 @@ class _LazyServiceProxy:
 inventory_service = _LazyServiceProxy(get_inventory_service)
 memory_service = _LazyServiceProxy(get_memory_service)
 persistent_memory = _LazyServiceProxy(get_persistent_memory)
+booking_service = _LazyServiceProxy(get_booking_service)
+lead_service = _LazyServiceProxy(get_lead_service)
 chat_orchestrator = _LazyServiceProxy(get_chat_orchestrator)
 
 def create_app(
     db_path: Optional[str] = None,
+    csv_path: Optional[str] = None,
     query_interpreter: Optional[QueryInterpreter] = None,
     inventory_service_inst: Optional[InventoryService] = None,
     memory_service_inst: Optional[MemoryService] = None,
     persistent_memory_inst: Optional[PersistentMemoryService] = None,
+    booking_service_inst: Optional[BookingService] = None,
+    lead_service_inst: Optional[LeadService] = None,
     orchestrator_inst: Optional[ChatOrchestrator] = None,
 ) -> FastAPI:
     """Application factory providing dependency injection for test isolation and production execution."""
@@ -89,16 +113,20 @@ def create_app(
     def _resolve_orch():
         if orchestrator_inst:
             return orchestrator_inst
-        if db_path or query_interpreter or persistent_memory_inst or memory_service_inst or inventory_service_inst:
+        if db_path or csv_path or query_interpreter or persistent_memory_inst or memory_service_inst or inventory_service_inst or booking_service_inst or lead_service_inst:
             inv = inventory_service_inst or get_inventory_service()
             mem = memory_service_inst or get_memory_service()
             pmem = persistent_memory_inst or (PersistentMemoryService(db_path=db_path) if db_path else get_persistent_memory())
+            book = booking_service_inst or (BookingService(db_path=db_path, persistent_memory=pmem) if db_path else get_booking_service())
+            lead = lead_service_inst or (LeadService(csv_path=csv_path) if csv_path else get_lead_service())
             interp = query_interpreter or QueryInterpreter()
             return ChatOrchestrator(
                 query_interpreter=interp,
                 inventory_service=inv,
                 memory_service=mem,
                 persistent_memory=pmem,
+                booking_service=book,
+                lead_service=lead,
             )
         return get_chat_orchestrator()
 

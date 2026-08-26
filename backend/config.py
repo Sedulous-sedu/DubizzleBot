@@ -17,5 +17,6 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./dubizzle_bot.db")
     DATASET_PATH: str = os.getenv("DATASET_PATH", "Copy_of_sample_cars_dataset.xlsx")
     LEADS_CSV_PATH: str = os.getenv("LEADS_CSV_PATH", "leads.csv")
+    BOOKING_TIMEZONE: str = os.getenv("BOOKING_TIMEZONE", "Asia/Dubai")
 
 settings = Settings()

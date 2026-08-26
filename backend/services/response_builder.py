@@ -227,6 +227,13 @@ class GroundedResponseBuilder:
         return "I would be happy to help arrange a viewing or test drive. Which vehicle from our inventory are you interested in viewing?"
 
     @staticmethod
+    def format_viewing_clarification_response(question: Optional[str] = None) -> str:
+        """Formats clarification question for viewing or test-drive requests."""
+        if question:
+            return question
+        return "Which vehicle from our inventory are you interested in viewing?"
+
+    @staticmethod
     def format_general_chat_response(message: str) -> str:
         """Handles greetings, capability questions, and competitor redirections."""
         msg_lower = message.lower()
@@ -434,4 +441,91 @@ class GroundedResponseBuilder:
         elif target == "all":
             return "I've cleared all your profile data, saved preferences, and favorites."
         return "I've updated your saved memory."
+
+    @classmethod
+    def format_booking_summary_for_confirmation(cls, draft: Any, tz_name: str = "Asia/Dubai") -> str:
+        """Summarizes booking draft details before explicit user confirmation."""
+        car_info = f"Listing #{draft.listing_id}"
+        if draft.target_car:
+            car_info = f"{draft.target_car.year} {draft.target_car.make} {draft.target_car.model} (Listing #{draft.listing_id})"
+
+        dt_str = "Selected date/time"
+        if draft.appointment_at:
+            dt_str = draft.appointment_at.strftime("%A, %B %d, %Y at %I:%M %p") + f" ({tz_name})"
+
+        return (
+            f"Please confirm your test-drive booking details:\n\n"
+            f"• Vehicle: {car_info}\n"
+            f"• Appointment: {dt_str}\n\n"
+            f"Would you like me to confirm this test drive?"
+        )
+
+    @classmethod
+    def format_booking_confirmed_response(cls, booking: Any, car: Optional[CarListing] = None) -> str:
+        """Formats confirmation message after booking is persisted."""
+        car_title = f"Listing #{booking.listing_id}"
+        if car:
+            car_title = f"{car.year} {car.make} {car.model} (Listing #{car.listing_id})"
+
+        dt_str = booking.appointment_at.strftime("%A, %B %d, %Y at %I:%M %p")
+        return (
+            f"Your test drive for the {car_title} has been confirmed for {dt_str} "
+            f"(Booking Ref: #{booking.booking_id}). We look forward to seeing you!"
+        )
+
+    @staticmethod
+    def format_booking_cancelled_response() -> str:
+        """Formats response when test drive draft is cancelled."""
+        return "I've cancelled your test-drive request. Let me know if you would like to explore other vehicles or schedule another time."
+
+    @classmethod
+    def format_lead_summary_for_confirmation(cls, lead: Any) -> str:
+        """Summarizes lead draft details before explicit user confirmation."""
+        items = []
+        if lead.interested_listing_id:
+            items.append(f"• Interested Vehicle: Listing #{lead.interested_listing_id}")
+        elif lead.interested_make or lead.interested_model:
+            v_str = f"{lead.interested_make or ''} {lead.interested_model or ''}".strip()
+            items.append(f"• Interested Vehicle: {v_str}")
+
+        if lead.min_budget_aed and lead.max_budget_aed:
+            items.append(f"• Budget: AED {lead.min_budget_aed:,.0f} - AED {lead.max_budget_aed:,.0f}")
+        elif lead.max_budget_aed:
+            items.append(f"• Budget: up to AED {lead.max_budget_aed:,.0f}")
+        elif lead.min_budget_aed:
+            items.append(f"• Budget: from AED {lead.min_budget_aed:,.0f}")
+
+        if lead.requirements:
+            items.append(f"• Needs: {lead.requirements}")
+
+        contact_items = []
+        if lead.name:
+            contact_items.append(f"Name: {lead.name}")
+        if lead.phone:
+            contact_items.append(f"Phone: {lead.phone}")
+        if lead.email:
+            contact_items.append(f"Email: {lead.email}")
+
+        if contact_items:
+            items.append(f"• Contact: {', '.join(contact_items)}")
+
+        summary_body = "\n".join(items) if items else "• General Enquiry"
+        return (
+            f"Here is a summary of your enquiry before submission:\n\n"
+            f"{summary_body}\n\n"
+            f"Would you like me to submit your enquiry to our sales team?"
+        )
+
+    @classmethod
+    def format_lead_submitted_response(cls, lead: Any) -> str:
+        """Formats confirmation message after lead is written to CSV."""
+        return (
+            f"Thank you! Your enquiry (Ref: #{lead.lead_id}) has been submitted to our sales team. "
+            f"A representative will contact you shortly."
+        )
+
+    @staticmethod
+    def format_lead_cancelled_response() -> str:
+        """Formats response when lead draft is cancelled."""
+        return "I've cancelled your enquiry draft. Let me know if there's anything else I can help you with."
 

@@ -73,7 +73,29 @@ def init_db(db_path: Optional[str] = None):
             """)
 
             conn.execute("""
+            CREATE TABLE IF NOT EXISTS bookings (
+                booking_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+                listing_id INTEGER NOT NULL,
+                appointment_at TEXT NOT NULL,
+                customer_name TEXT,
+                customer_phone TEXT,
+                customer_email TEXT,
+                status TEXT NOT NULL DEFAULT 'confirmed',
+                created_at TEXT NOT NULL
+            );
+            """)
+
+            conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_liked_cars_user_id ON liked_cars(user_id);
+            """)
+
+            conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON bookings(user_id);
+            """)
+
+            conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bookings_appointment ON bookings(appointment_at);
             """)
 
             conn.execute("""

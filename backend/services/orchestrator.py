@@ -1,7 +1,8 @@
-"""Chat orchestrator connecting MemoryService, PersistentMemoryService, ContextResolver, LongTermMemoryResolver, QueryInterpreter, InventoryService, and GroundedResponseBuilder."""
+"""Chat orchestrator connecting MemoryService, PersistentMemoryService, ContextResolver, LongTermMemoryResolver, BookingService, LeadService, Phase5Resolver, QueryInterpreter, InventoryService, and GroundedResponseBuilder."""
 
 import uuid
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List
 from backend.models.car import CarListing
 from backend.models.chat import ChatRequest, ChatResponse
@@ -13,10 +14,21 @@ from backend.models.intent import (
 from backend.models.memory import (
     ResolutionStatus,
     ContextResolutionResult,
+    SessionState,
 )
 from backend.models.persistent_memory import (
     LongTermMemoryAction,
     LongTermMemoryResolution,
+)
+from backend.models.booking import (
+    BookingDraft,
+    ConfirmedBooking,
+    WorkflowStatus,
+    BookingStatus,
+)
+from backend.models.lead import (
+    LeadDraft,
+    QualifiedLead,
 )
 from backend.services.query_interpreter import QueryInterpreter
 from backend.services.inventory import InventoryService
@@ -25,11 +37,14 @@ from backend.services.memory import MemoryService
 from backend.services.persistent_memory import PersistentMemoryService
 from backend.services.context_resolver import ContextResolver
 from backend.services.long_term_resolver import LongTermMemoryResolver
+from backend.services.booking import BookingService
+from backend.services.lead import LeadService
+from backend.services.phase5_resolver import Phase5Resolver, Phase5Action, Phase5Resolution
 
 logger = logging.getLogger(__name__)
 
 class ChatOrchestrator:
-    """Core domain orchestrator coordinating session memory, persistent memory, contextual resolution, NLP interpretation, and inventory retrieval."""
+    """Core domain orchestrator coordinating session memory, persistent memory, bookings, leads, contextual resolution, NLP interpretation, and inventory retrieval."""
 
     def __init__(
         self,
@@ -37,11 +52,19 @@ class ChatOrchestrator:
         inventory_service: Optional[InventoryService] = None,
         memory_service: Optional[MemoryService] = None,
         persistent_memory: Optional[PersistentMemoryService] = None,
+        booking_service: Optional[BookingService] = None,
+        lead_service: Optional[LeadService] = None,
+        phase5_resolver: Optional[Phase5Resolver] = None,
+        current_time_override: Optional[datetime] = None,
     ):
         self.query_interpreter = query_interpreter or QueryInterpreter()
         self.inventory_service = inventory_service or InventoryService()
         self.memory_service = memory_service or MemoryService()
         self.persistent_memory = persistent_memory or PersistentMemoryService()
+        self.booking_service = booking_service or BookingService(persistent_memory=self.persistent_memory)
+        self.lead_service = lead_service or LeadService()
+        self.phase5_resolver = phase5_resolver or Phase5Resolver()
+        self.current_time_override = current_time_override
 
     def process_chat(self, request: ChatRequest) -> ChatResponse:
         """
@@ -54,7 +77,26 @@ class ChatOrchestrator:
         self.persistent_memory.record_activity(request.user_id)
 
         try:
-            # 1. Evaluate deterministic LongTermMemoryResolver first
+            # 1. Phase 5 Workflow Resolution (Active drafts continuation or new actions)
+            phase5_res: Phase5Resolution = self.phase5_resolver.evaluate(
+                request.message, session, current_time=self.current_time_override
+            )
+            if phase5_res.action != Phase5Action.NOT_PHASE5:
+                if phase5_res.action == Phase5Action.START_BOOKING:
+                    context_cand = ContextResolver.resolve(request.message, session)
+                    has_specific_car = (
+                        context_cand.status == ResolutionStatus.RESOLVED
+                        or session.active_listing_id is not None
+                        or len(session.current_result_set) == 1
+                    )
+                    if not has_specific_car and any(w in request.message.lower() for w in ["bentley", "toyota", "nissan", "ford", "under", "gcc", "suv", "sedan", "coupe", "bmw", "mercedes", "honda", "porsche", "land rover", "range rover"]):
+                        pass  # Fall through to Phase 3A VIEWING_OR_LEAD_REQUEST candidate retrieval
+                    else:
+                        return self._handle_phase5(request, session_id, session, phase5_res)
+                else:
+                    return self._handle_phase5(request, session_id, session, phase5_res)
+
+            # 2. Evaluate deterministic LongTermMemoryResolver (Phase 4B)
             lt_res: LongTermMemoryResolution = LongTermMemoryResolver.evaluate(request.message, session)
             if lt_res.action != LongTermMemoryAction.NOT_MEMORY_ACTION:
                 return self._handle_long_term_memory(request, session_id, lt_res)
@@ -812,6 +854,578 @@ class ChatOrchestrator:
                 requires_clarification=False
             )
 
+    def _handle_phase5(
+        self,
+        request: ChatRequest,
+        session_id: str,
+        session: SessionState,
+        phase5_res: Phase5Resolution
+    ) -> ChatResponse:
+        """Handles Phase 5 test-drive bookings and lead qualification workflows."""
+        user_id = request.user_id
+
+        # -------------------------------------------------------------
+        # 1. START_BOOKING
+        # -------------------------------------------------------------
+        if phase5_res.action == Phase5Action.START_BOOKING:
+            # Resolve target vehicle
+            ctx_res = ContextResolver.resolve(request.message, session)
+            target_car = None
+            if ctx_res.status == ResolutionStatus.RESOLVED:
+                target_car = ctx_res.resolved_car
+            elif session.active_listing_id is not None:
+                target_car = self.inventory_service.get_by_listing_id(session.active_listing_id)
+            elif len(session.current_result_set) == 1:
+                target_car = session.current_result_set[0]
+
+            if target_car is None:
+                response_text = GroundedResponseBuilder.format_viewing_clarification_response()
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=None,
+                    referenced_listing_id=None,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=None,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=0,
+                    requires_clarification=True,
+                )
+
+            draft = BookingDraft(
+                user_id=user_id,
+                session_id=session_id,
+                listing_id=target_car.listing_id,
+                target_car=target_car,
+                requested_date=phase5_res.date_val,
+                requested_time=phase5_res.time_val,
+                requested_date_str=phase5_res.raw_date_str,
+                requested_time_str=phase5_res.raw_time_str,
+                customer_name=phase5_res.extracted_name,
+                customer_phone=phase5_res.extracted_phone,
+                customer_email=phase5_res.extracted_email,
+            )
+            session.pending_booking = draft
+
+            if phase5_res.is_ambiguous_time:
+                response_text = phase5_res.clarification_prompt or "Do you mean AM or PM? (Our business hours are 8:00 AM to 8:00 PM Asia/Dubai)."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[target_car],
+                    referenced_listing_id=target_car.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[target_car],
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1,
+                    requires_clarification=True,
+                )
+
+            if draft.requested_date is None and draft.requested_time is None:
+                response_text = (
+                    f"I can help arrange a test drive for the {target_car.year} {target_car.make} {target_car.model} "
+                    f"(Listing #{target_car.listing_id}). What date and time between Monday–Saturday, 8:00 AM to 8:00 PM would you prefer?"
+                )
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[target_car],
+                    referenced_listing_id=target_car.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[target_car],
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1,
+                    requires_clarification=False,
+                )
+            elif draft.requested_date is None:
+                response_text = "What date would you like your appointment? We are open Monday through Saturday."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[target_car],
+                    referenced_listing_id=target_car.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[target_car],
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1,
+                    requires_clarification=False,
+                )
+            elif draft.requested_time is None:
+                d_str = draft.requested_date.strftime("%A, %B %d")
+                response_text = f"What time on {d_str} would you like your appointment? We are open from 8:00 AM to 8:00 PM."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[target_car],
+                    referenced_listing_id=target_car.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[target_car],
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1,
+                    requires_clarification=False,
+                )
+            else:
+                dt = datetime.combine(draft.requested_date, draft.requested_time).replace(tzinfo=self.booking_service.get_timezone())
+                val_res = self.booking_service.validate_appointment(dt, current_time=self.current_time_override)
+                if not val_res.is_valid:
+                    response_text = val_res.error_message or "Please select an appointment time within our business hours."
+                    self.memory_service.record_turn(
+                        user_id=user_id,
+                        session_id=session_id,
+                        user_message=request.message,
+                        assistant_response=response_text,
+                        intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                        matched_cars=[target_car],
+                        referenced_listing_id=target_car.listing_id,
+                        replace_result_set=False,
+                    )
+                    return ChatResponse(
+                        user_id=user_id,
+                        session_id=session_id,
+                        response=response_text,
+                        matched_cars=[target_car],
+                        intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                        total_matches=1,
+                        requires_clarification=True,
+                    )
+                else:
+                    draft.appointment_at = dt
+                    draft.status = WorkflowStatus.AWAITING_CONFIRMATION
+                    response_text = GroundedResponseBuilder.format_booking_summary_for_confirmation(draft, tz_name=self.booking_service.timezone_name)
+                    self.memory_service.record_turn(
+                        user_id=user_id,
+                        session_id=session_id,
+                        user_message=request.message,
+                        assistant_response=response_text,
+                        intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                        matched_cars=[target_car],
+                        referenced_listing_id=target_car.listing_id,
+                        replace_result_set=False,
+                    )
+                    return ChatResponse(
+                        user_id=user_id,
+                        session_id=session_id,
+                        response=response_text,
+                        matched_cars=[target_car],
+                        intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                        total_matches=1,
+                        requires_clarification=False,
+                    )
+
+        # -------------------------------------------------------------
+        # 2. CONTINUE_BOOKING
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CONTINUE_BOOKING:
+            draft = session.pending_booking
+            if not draft or not draft.target_car:
+                response_text = "Which vehicle would you like to book a test drive for?"
+                return ChatResponse(user_id=user_id, session_id=session_id, response=response_text, total_matches=0, intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST)
+
+            if phase5_res.is_ambiguous_time:
+                response_text = phase5_res.clarification_prompt or "Do you mean AM or PM? (Our business hours are 8:00 AM to 8:00 PM Asia/Dubai)."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[draft.target_car],
+                    referenced_listing_id=draft.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[draft.target_car],
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1,
+                    requires_clarification=True,
+                )
+
+            if phase5_res.date_val:
+                draft.requested_date = phase5_res.date_val
+                draft.requested_date_str = phase5_res.raw_date_str
+            if phase5_res.time_val:
+                draft.requested_time = phase5_res.time_val
+                draft.requested_time_str = phase5_res.raw_time_str
+            if phase5_res.extracted_name:
+                draft.customer_name = phase5_res.extracted_name
+            if phase5_res.extracted_phone:
+                draft.customer_phone = phase5_res.extracted_phone
+            if phase5_res.extracted_email:
+                draft.customer_email = phase5_res.extracted_email
+
+            if draft.requested_date is None and draft.requested_time is None:
+                response_text = "What date and time would you prefer for your appointment? We are open Monday through Saturday, 8:00 AM to 8:00 PM."
+            elif draft.requested_date is None:
+                response_text = "What date would you like your appointment? We are open Monday through Saturday."
+            elif draft.requested_time is None:
+                d_str = draft.requested_date.strftime("%A, %B %d")
+                response_text = f"What time on {d_str} would you like your appointment? We are open from 8:00 AM to 8:00 PM."
+            else:
+                dt = datetime.combine(draft.requested_date, draft.requested_time).replace(tzinfo=self.booking_service.get_timezone())
+                val_res = self.booking_service.validate_appointment(dt, current_time=self.current_time_override)
+                if not val_res.is_valid:
+                    response_text = val_res.error_message or "Please select an appointment time within our business hours."
+                    draft.status = WorkflowStatus.COLLECTING
+                else:
+                    draft.appointment_at = dt
+                    draft.status = WorkflowStatus.AWAITING_CONFIRMATION
+                    response_text = GroundedResponseBuilder.format_booking_summary_for_confirmation(draft, tz_name=self.booking_service.timezone_name)
+
+            self.memory_service.record_turn(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=request.message,
+                assistant_response=response_text,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                matched_cars=[draft.target_car],
+                referenced_listing_id=draft.listing_id,
+                replace_result_set=False,
+            )
+            return ChatResponse(
+                user_id=user_id,
+                session_id=session_id,
+                response=response_text,
+                matched_cars=[draft.target_car],
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                total_matches=1,
+                requires_clarification=(draft.status != WorkflowStatus.AWAITING_CONFIRMATION),
+            )
+
+        # -------------------------------------------------------------
+        # 3. CONFIRM_BOOKING
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CONFIRM_BOOKING:
+            draft = session.pending_booking
+            if draft and draft.status == WorkflowStatus.AWAITING_CONFIRMATION and draft.appointment_at and draft.listing_id:
+                confirmed = ConfirmedBooking(
+                    booking_id=draft.booking_id,
+                    user_id=user_id,
+                    listing_id=draft.listing_id,
+                    appointment_at=draft.appointment_at,
+                    customer_name=draft.customer_name,
+                    customer_phone=draft.customer_phone,
+                    customer_email=draft.customer_email,
+                    status=BookingStatus.CONFIRMED,
+                    created_at=datetime.now(timezone.utc),
+                )
+                self.booking_service.save_booking(confirmed)
+                saved_car = draft.target_car or self.inventory_service.get_by_listing_id(draft.listing_id)
+                session.pending_booking = None
+                response_text = GroundedResponseBuilder.format_booking_confirmed_response(confirmed, saved_car)
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=[saved_car] if saved_car else None,
+                    referenced_listing_id=draft.listing_id,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=[saved_car] if saved_car else None,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=1 if saved_car else 0,
+                    requires_clarification=False,
+                )
+            else:
+                response_text = "No pending test-drive booking found to confirm. Please let me know which vehicle you'd like to book."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=None,
+                    referenced_listing_id=None,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=None,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=0,
+                    requires_clarification=False,
+                )
+
+        # -------------------------------------------------------------
+        # 4. CANCEL_BOOKING
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CANCEL_BOOKING:
+            session.pending_booking = None
+            response_text = GroundedResponseBuilder.format_booking_cancelled_response()
+            self.memory_service.record_turn(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=request.message,
+                assistant_response=response_text,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                matched_cars=None,
+                referenced_listing_id=None,
+                replace_result_set=False,
+            )
+            return ChatResponse(
+                user_id=user_id,
+                session_id=session_id,
+                response=response_text,
+                matched_cars=None,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                total_matches=0,
+                requires_clarification=False,
+            )
+
+        # -------------------------------------------------------------
+        # 5. START_LEAD
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.START_LEAD:
+            prefs = self.persistent_memory.get_preferences(user_id)
+            seed_min_b = prefs.min_price_aed if (prefs and prefs.has_explicit_preferences()) else None
+            seed_max_b = prefs.max_price_aed if (prefs and prefs.has_explicit_preferences()) else None
+            seed_make = prefs.preferred_make if (prefs and prefs.has_explicit_preferences()) else None
+            seed_model = prefs.preferred_model if (prefs and prefs.has_explicit_preferences()) else None
+            seed_reqs = prefs.regional_specs if (prefs and prefs.has_explicit_preferences() and prefs.regional_specs) else None
+
+            min_b = phase5_res.extracted_min_budget if phase5_res.extracted_min_budget is not None else seed_min_b
+            max_b = phase5_res.extracted_max_budget if phase5_res.extracted_max_budget is not None else seed_max_b
+            reqs = phase5_res.extracted_requirements or seed_reqs
+            interested_lid = session.active_listing_id if session.active_listing_id else (session.current_result_set[0].listing_id if len(session.current_result_set) == 1 else None)
+
+            ldraft = LeadDraft(
+                user_id=user_id,
+                session_id=session_id,
+                name=phase5_res.extracted_name,
+                phone=phase5_res.extracted_phone,
+                email=phase5_res.extracted_email,
+                min_budget_aed=min_b,
+                max_budget_aed=max_b,
+                interested_make=seed_make,
+                interested_model=seed_model,
+                interested_listing_id=interested_lid,
+                requirements=reqs,
+            )
+            session.pending_lead = ldraft
+
+            if not ldraft.has_budget():
+                response_text = "What is your target budget or price range?"
+            elif not ldraft.has_automotive_need():
+                response_text = "What specific vehicle or requirements are you looking for (make, model, or specs)?"
+            elif not ldraft.has_contact():
+                response_text = "Please provide your phone number or email address so our sales representative can contact you."
+            else:
+                ldraft.status = WorkflowStatus.AWAITING_CONFIRMATION
+                response_text = GroundedResponseBuilder.format_lead_summary_for_confirmation(ldraft)
+
+            self.memory_service.record_turn(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=request.message,
+                assistant_response=response_text,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                matched_cars=None,
+                referenced_listing_id=None,
+                replace_result_set=False,
+            )
+            return ChatResponse(
+                user_id=user_id,
+                session_id=session_id,
+                response=response_text,
+                matched_cars=None,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                total_matches=0,
+                requires_clarification=(ldraft.status != WorkflowStatus.AWAITING_CONFIRMATION),
+            )
+
+        # -------------------------------------------------------------
+        # 6. CONTINUE_LEAD
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CONTINUE_LEAD:
+            ldraft = session.pending_lead
+            if not ldraft:
+                return ChatResponse(user_id=user_id, session_id=session_id, response="No active enquiry found. What vehicle are you looking for?", total_matches=0, intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST)
+
+            if phase5_res.extracted_name:
+                ldraft.name = phase5_res.extracted_name
+            if phase5_res.extracted_phone:
+                ldraft.phone = phase5_res.extracted_phone
+            if phase5_res.extracted_email:
+                ldraft.email = phase5_res.extracted_email
+            if phase5_res.extracted_min_budget is not None:
+                ldraft.min_budget_aed = phase5_res.extracted_min_budget
+            if phase5_res.extracted_max_budget is not None:
+                ldraft.max_budget_aed = phase5_res.extracted_max_budget
+            if phase5_res.extracted_requirements:
+                ldraft.requirements = phase5_res.extracted_requirements
+
+            if not ldraft.has_budget():
+                response_text = "What is your target budget or price range?"
+            elif not ldraft.has_automotive_need():
+                response_text = "What specific vehicle or requirements are you looking for?"
+            elif not ldraft.has_contact():
+                response_text = "Please provide your phone number or email address so we can reach you."
+            else:
+                ldraft.status = WorkflowStatus.AWAITING_CONFIRMATION
+                response_text = GroundedResponseBuilder.format_lead_summary_for_confirmation(ldraft)
+
+            self.memory_service.record_turn(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=request.message,
+                assistant_response=response_text,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                matched_cars=None,
+                referenced_listing_id=None,
+                replace_result_set=False,
+            )
+            return ChatResponse(
+                user_id=user_id,
+                session_id=session_id,
+                response=response_text,
+                matched_cars=None,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                total_matches=0,
+                requires_clarification=(ldraft.status != WorkflowStatus.AWAITING_CONFIRMATION),
+            )
+
+        # -------------------------------------------------------------
+        # 7. CONFIRM_LEAD
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CONFIRM_LEAD:
+            ldraft = session.pending_lead
+            if ldraft and ldraft.status == WorkflowStatus.AWAITING_CONFIRMATION:
+                qlead = QualifiedLead(
+                    lead_id=ldraft.lead_id,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    user_id=user_id,
+                    session_id=session_id,
+                    name=ldraft.name,
+                    phone=ldraft.phone,
+                    email=ldraft.email,
+                    min_budget_aed=ldraft.min_budget_aed,
+                    max_budget_aed=ldraft.max_budget_aed,
+                    interested_make=ldraft.interested_make,
+                    interested_model=ldraft.interested_model,
+                    interested_listing_id=ldraft.interested_listing_id,
+                    requirements=ldraft.requirements,
+                    booking_reference=ldraft.booking_reference,
+                )
+                self.lead_service.save_lead(qlead)
+                session.pending_lead = None
+                response_text = GroundedResponseBuilder.format_lead_submitted_response(qlead)
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=None,
+                    referenced_listing_id=None,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=None,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=0,
+                    requires_clarification=False,
+                )
+            else:
+                response_text = "No pending enquiry found to confirm. Please let me know what vehicle or budget you are interested in."
+                self.memory_service.record_turn(
+                    user_id=user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    matched_cars=None,
+                    referenced_listing_id=None,
+                    replace_result_set=False,
+                )
+                return ChatResponse(
+                    user_id=user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=None,
+                    intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                    total_matches=0,
+                    requires_clarification=False,
+                )
+
+        # -------------------------------------------------------------
+        # 8. CANCEL_LEAD
+        # -------------------------------------------------------------
+        elif phase5_res.action == Phase5Action.CANCEL_LEAD:
+            session.pending_lead = None
+            response_text = GroundedResponseBuilder.format_lead_cancelled_response()
+            self.memory_service.record_turn(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=request.message,
+                assistant_response=response_text,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                matched_cars=None,
+                referenced_listing_id=None,
+                replace_result_set=False,
+            )
+            return ChatResponse(
+                user_id=user_id,
+                session_id=session_id,
+                response=response_text,
+                matched_cars=None,
+                intent=UserIntentEnum.VIEWING_OR_LEAD_REQUEST,
+                total_matches=0,
+                requires_clarification=False,
+            )
+
         # Fallback
         return ChatResponse(
             user_id=user_id,
@@ -820,7 +1434,7 @@ class ChatOrchestrator:
             matched_cars=None,
             intent=UserIntentEnum.GENERAL_CHAT,
             total_matches=0,
-            requires_clarification=False
+            requires_clarification=False,
         )
 
     @staticmethod
@@ -842,4 +1456,5 @@ class ChatOrchestrator:
             query_filters.keywords,
         ]
         return any(f is not None for f in fields)
+
 

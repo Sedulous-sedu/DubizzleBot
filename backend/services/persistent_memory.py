@@ -63,6 +63,27 @@ class PersistentMemoryService:
         finally:
             conn.close()
 
+    def get_profile(self, user_id: str) -> Optional[UserProfile]:
+        """Retrieves an existing UserProfile without creating one."""
+        clean_user_id = str(user_id).strip()
+        conn = get_db_connection(self.db_path)
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT user_id, created_at, updated_at, last_seen_at FROM user_profiles WHERE user_id = ?",
+                    (clean_user_id,)
+                ).fetchone()
+                if not row:
+                    return None
+                return UserProfile(
+                    user_id=row["user_id"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=datetime.fromisoformat(row["updated_at"]),
+                    last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
+                )
+        finally:
+            conn.close()
+
     def record_activity(self, user_id: str) -> None:
         """Updates last_seen_at for a given user_id."""
         self.get_or_create_profile(user_id)

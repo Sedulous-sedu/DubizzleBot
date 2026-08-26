@@ -223,5 +223,72 @@ def test_chat_endpoint_multi_session_persistent_memory_flow(client, mock_api_cha
     assert "Bentley" in data5["response"]
     assert "1 vehicle in your favorites" in data5["response"]
 
+def test_chat_endpoint_booking_multi_turn_flow(client, mock_api_chat_interpreter):
+    """Verify multi-turn test-drive booking flow through POST /chat."""
+    from backend.models.intent import ParsedInventoryQuery
+
+    mock_api_chat_interpreter.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Bentley"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+    user_id = "user_api_booking"
+
+    # Turn 1: Search Bentleys
+    res1 = client.post("/chat", json={"user_id": user_id, "message": "Show me Bentleys"})
+    assert res1.status_code == 200
+    data1 = res1.json()
+    session_id = data1["session_id"]
+    second_car = data1["matched_cars"][1]
+
+    # Turn 2: Test drive the second one
+    res2 = client.post("/chat", json={"user_id": user_id, "session_id": session_id, "message": "I want to test drive the second one."})
+    assert res2.status_code == 200
+    assert "what date and time" in res2.json()["response"].lower()
+
+    # Turn 3: Saturday at 3 PM
+    res3 = client.post("/chat", json={"user_id": user_id, "session_id": session_id, "message": "Saturday at 3 PM"})
+    assert res3.status_code == 200
+    assert "would you like me to confirm this test drive?" in res3.json()["response"].lower()
+
+    # Turn 4: Explicit confirmation
+    res4 = client.post("/chat", json={"user_id": user_id, "session_id": session_id, "message": "Yes confirm"})
+    assert res4.status_code == 200
+    assert "has been confirmed" in res4.json()["response"].lower()
+    assert "booking ref:" in res4.json()["response"].lower()
+
+def test_chat_endpoint_lead_qualification_flow(client):
+    """Verify lead capture workflow through POST /chat."""
+    user_id = "user_api_lead"
+
+    # Turn 1: Start lead inquiry
+    res1 = client.post("/chat", json={
+        "user_id": user_id,
+        "message": "I'd like to submit an enquiry for a GCC car under AED 150,000."
+    })
+    assert res1.status_code == 200
+    session_id = res1.json()["session_id"]
+    assert "phone number or email" in res1.json()["response"].lower()
+
+    # Turn 2: Provide contact
+    res2 = client.post("/chat", json={
+        "user_id": user_id,
+        "session_id": session_id,
+        "message": "My phone is +971501234567, name is John"
+    })
+    assert res2.status_code == 200
+    assert "summary of your enquiry" in res2.json()["response"].lower()
+
+    # Turn 3: Confirm submission
+    res3 = client.post("/chat", json={
+        "user_id": user_id,
+        "session_id": session_id,
+        "message": "Yes please submit"
+    })
+    assert res3.status_code == 200
+    assert "has been submitted to our sales team" in res3.json()["response"].lower()
+
+
 
 
