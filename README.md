@@ -345,7 +345,7 @@ Booking availability is **simulated** per the assessment specification:
 
 **Deduplication:** `LeadService` enforces idempotency using a stable `lead_id`. On each save, it acquires a threading lock, reads existing `lead_id` values from the CSV under that lock, and skips the append if the same `lead_id` already exists. This is a process-level guarantee suitable for the single-server prototype.
 
-**Persistence:** Append-only CSV with 13 structured columns (`lead_id`, `created_at`, `user_id`, `session_id`, `name`, `phone`, `email`, `min_budget_aed`, `max_budget_aed`, `interested_make`, `interested_model`, `interested_listing_id`, `requirements`).
+**Persistence:** Append-only CSV with 14 structured columns (`lead_id`, `created_at`, `user_id`, `session_id`, `name`, `phone`, `email`, `min_budget_aed`, `max_budget_aed`, `interested_make`, `interested_model`, `interested_listing_id`, `requirements`, `booking_reference`).
 
 ---
 
