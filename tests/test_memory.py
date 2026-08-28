@@ -8,6 +8,7 @@ from backend.models.memory import (
     SessionState,
     ConversationTurn,
     ResolutionStatus,
+    ResultSetComparisonType,
     TargetAttribute,
 )
 from backend.services.memory import MemoryService
@@ -377,3 +378,182 @@ def test_existing_pronoun_forms_remain_unchanged(
     assert result.status == ResolutionStatus.RESOLVED
     assert result.resolved_car.listing_id == 17
     assert result.target_attribute == expected_attribute
+
+
+# =============================================================================
+# Contextual Model-Year Result-Set Comparison Tests (Phase 4A Enhancement)
+# =============================================================================
+
+def test_context_resolver_latest_year_single_winner(sample_cars):
+    """Result years: [2021: #101, 2020: #102, 2019: #103] -> Latest is 2021 (#101)."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+
+    res = ContextResolver.resolve("Which is the latest year model?", session)
+
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.LATEST_YEAR
+    assert res.comparison_year == 2021
+    assert len(res.resolved_cars) == 1
+    assert res.resolved_cars[0].listing_id == 101
+    assert res.resolved_car.listing_id == 101
+
+def test_context_resolver_latest_year_ties_preserves_order():
+    """Result years: [2012: #1, 2014: #2, 2011: #3, 2014: #4] -> Ties for 2014 (#2 and #4 in order)."""
+    car1 = CarListing(listing_id=1, make="Ford", model="Explorer", year=2012, title="2012 Ford Explorer", description="Clean condition")
+    car2 = CarListing(listing_id=2, make="Ford", model="Edge", year=2014, title="2014 Ford Edge", description="Clean condition")
+    car3 = CarListing(listing_id=3, make="Ford", model="Focus", year=2011, title="2011 Ford Focus", description="Clean condition")
+    car4 = CarListing(listing_id=4, make="Ford", model="Mustang", year=2014, title="2014 Ford Mustang", description="Clean condition")
+    session = SessionState(session_id="s", user_id="u", current_result_set=[car1, car2, car3, car4])
+
+    res = ContextResolver.resolve("Which is the latest?", session)
+
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.LATEST_YEAR
+    assert res.comparison_year == 2014
+    assert len(res.resolved_cars) == 2
+    assert [c.listing_id for c in res.resolved_cars] == [2, 4]
+    assert res.resolved_car is None  # No single winner when tied
+
+def test_context_resolver_oldest_year_single_winner(sample_cars):
+    """Result years: [2021: #101, 2020: #102, 2019: #103] -> Oldest is 2019 (#103)."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+
+    res = ContextResolver.resolve("Which is the oldest?", session)
+
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.OLDEST_YEAR
+    assert res.comparison_year == 2019
+    assert len(res.resolved_cars) == 1
+    assert res.resolved_cars[0].listing_id == 103
+    assert res.resolved_car.listing_id == 103
+
+def test_context_resolver_oldest_year_ties_preserves_order():
+    """Result years: [2010: #10, 2012: #20, 2010: #30] -> Ties for 2010 (#10 and #30 in order)."""
+    car1 = CarListing(listing_id=10, make="Nissan", model="Altima", year=2010, title="2010 Nissan Altima", description="Clean condition")
+    car2 = CarListing(listing_id=20, make="Nissan", model="Maxima", year=2012, title="2012 Nissan Maxima", description="Clean condition")
+    car3 = CarListing(listing_id=30, make="Nissan", model="Sentra", year=2010, title="2010 Nissan Sentra", description="Clean condition")
+    session = SessionState(session_id="s", user_id="u", current_result_set=[car1, car2, car3])
+
+    res = ContextResolver.resolve("Which has the earliest model year?", session)
+
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.OLDEST_YEAR
+    assert res.comparison_year == 2010
+    assert len(res.resolved_cars) == 2
+    assert [c.listing_id for c in res.resolved_cars] == [10, 30]
+
+def test_context_resolver_single_result_set_comparison(sample_cars):
+    """Single result set [2021: #101] -> trivially both latest and oldest."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=[sample_cars[0]])
+
+    res_latest = ContextResolver.resolve("Which is the newest one?", session)
+    assert res_latest.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res_latest.comparison_type == ResultSetComparisonType.LATEST_YEAR
+    assert res_latest.comparison_year == 2021
+    assert len(res_latest.resolved_cars) == 1
+    assert res_latest.resolved_cars[0].listing_id == 101
+
+    res_oldest = ContextResolver.resolve("Which is the oldest?", session)
+    assert res_oldest.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res_oldest.comparison_type == ResultSetComparisonType.OLDEST_YEAR
+    assert res_oldest.comparison_year == 2021
+    assert len(res_oldest.resolved_cars) == 1
+    assert res_oldest.resolved_cars[0].listing_id == 101
+
+def test_context_resolver_empty_result_set_comparison_clarification():
+    """Empty result set returns CLARIFICATION_REQUIRED without fabricating results."""
+    session = SessionState(session_id="s_empty", user_id="u_empty", current_result_set=[])
+
+    res_latest = ContextResolver.resolve("Which is the latest?", session)
+    assert res_latest.status == ResolutionStatus.CLARIFICATION_REQUIRED
+    assert res_latest.comparison_type == ResultSetComparisonType.LATEST_YEAR
+    assert res_latest.resolved_cars is None
+    assert "Search for some cars first" in res_latest.clarification_message
+    assert "latest model year" in res_latest.clarification_message
+
+    res_oldest = ContextResolver.resolve("Which is the oldest?", session)
+    assert res_oldest.status == ResolutionStatus.CLARIFICATION_REQUIRED
+    assert res_oldest.comparison_type == ResultSetComparisonType.OLDEST_YEAR
+    assert res_oldest.resolved_cars is None
+    assert "Search for some cars first" in res_oldest.clarification_message
+    assert "oldest model year" in res_oldest.clarification_message
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Which is the latest year model?",
+        "Which is the latest model?",
+        "Which one is the latest?",
+        "What's the newest one?",
+        "What is the newest one?",
+        "Which is the newest car?",
+        "Which has the newest model year?",
+        "Which one is most recent?",
+        "Which is newest?",
+        "Which is latest?",
+        "Which car is newest?",
+        "Which vehicle is the latest?",
+        "Which of these is the newest?",
+    ],
+)
+def test_context_resolver_latest_phrasing_variants(sample_cars, query):
+    """Verifies supported phrasing variants for latest model year comparisons."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+    res = ContextResolver.resolve(query, session)
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.LATEST_YEAR
+    assert res.comparison_year == 2021
+    assert len(res.resolved_cars) == 1
+    assert res.resolved_cars[0].listing_id == 101
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Which is the oldest?",
+        "Which is the oldest model?",
+        "Which has the earliest model year?",
+        "Which one is the oldest?",
+        "What's the oldest one?",
+        "What is the oldest car?",
+        "Which car is the oldest?",
+        "Which is the earliest model?",
+        "Which has the earliest year?",
+        "Which is earliest?",
+        "Which is oldest?",
+        "Which of these is the oldest?",
+    ],
+)
+def test_context_resolver_oldest_phrasing_variants(sample_cars, query):
+    """Verifies supported phrasing variants for oldest model year comparisons."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+    res = ContextResolver.resolve(query, session)
+    assert res.status == ResolutionStatus.RESULT_SET_COMPARISON
+    assert res.comparison_type == ResultSetComparisonType.OLDEST_YEAR
+    assert res.comparison_year == 2019
+    assert len(res.resolved_cars) == 1
+    assert res.resolved_cars[0].listing_id == 103
+
+def test_context_resolver_ordinal_year_lookup_not_intercepted_as_comparison(sample_cars):
+    """'Which year is the second one?' must resolve specific car attribute, NOT result-set comparison."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+    res = ContextResolver.resolve("Which year is the second one?", session)
+    assert res.status == ResolutionStatus.RESOLVED
+    assert res.resolved_car.listing_id == 102
+    assert res.target_attribute == TargetAttribute.YEAR
+    assert res.comparison_type is None
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Show me the newest cars",
+        "Find the latest cars",
+        "Show me the 5 newest Fords",
+        "Search for the latest models",
+        "List newest vehicles",
+    ],
+)
+def test_context_resolver_fresh_ranking_queries_not_intercepted(sample_cars, query):
+    """Fresh search queries with imperative prefixes must NOT be intercepted as session comparisons."""
+    session = SessionState(session_id="s", user_id="u", current_result_set=sample_cars)
+    res = ContextResolver.resolve(query, session)
+    assert res.status == ResolutionStatus.NOT_CONTEXTUAL

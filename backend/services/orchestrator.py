@@ -106,7 +106,35 @@ class ChatOrchestrator:
             # 2. Evaluate deterministic ContextResolver on active session state (Phase 4A)
             context_result: ContextResolutionResult = ContextResolver.resolve(request.message, session)
 
-            if context_result.status == ResolutionStatus.RESOLVED:
+            if context_result.status == ResolutionStatus.RESULT_SET_COMPARISON:
+                matching_cars = context_result.resolved_cars or []
+                target_year = context_result.comparison_year
+                comp_type = context_result.comparison_type
+                response_text = GroundedResponseBuilder.format_result_set_comparison_response(
+                    matching_cars, comp_type, target_year
+                )
+                self.memory_service.record_turn(
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    user_message=request.message,
+                    assistant_response=response_text,
+                    intent=UserIntentEnum.INVENTORY_SEARCH,
+                    matched_cars=matching_cars,
+                    referenced_listing_id=None,
+                    replace_result_set=False,
+                    active_listing_id=session.active_listing_id
+                )
+                return ChatResponse(
+                    user_id=request.user_id,
+                    session_id=session_id,
+                    response=response_text,
+                    matched_cars=matching_cars,
+                    intent=UserIntentEnum.INVENTORY_SEARCH,
+                    total_matches=len(matching_cars),
+                    requires_clarification=False
+                )
+
+            elif context_result.status == ResolutionStatus.RESOLVED:
                 target_car = context_result.resolved_car
                 response_text = GroundedResponseBuilder.format_vehicle_attribute_response(
                     target_car, context_result.target_attribute

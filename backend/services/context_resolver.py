@@ -7,6 +7,7 @@ from backend.models.memory import (
     SessionState,
     ContextResolutionResult,
     ResolutionStatus,
+    ResultSetComparisonType,
     TargetAttribute,
 )
 
@@ -50,6 +51,7 @@ class ContextResolver:
         r"^(show|find|search|look\s+for|list|give\s+me|get\s+me|i\s+want|i\s+need|i'm\s+looking\s+for)\s+(me\s+)?(all\s+)?(cars|vehicles|suvs|sedans|options|automobiles)\b",
         r"^(show|find|search|look\s+for|list|give\s+me|get\s+me|i\s+want|i\s+need|i'm\s+looking\s+for)\s+([a-zA-Z0-9_-]+\s+)?(cars|vehicles|suvs|sedans|options)\b",
         r"^(show|find|search|look\s+for|list|give\s+me|get\s+me|i\s+want|i\s+need)\s+(me\s+)?(any\s+)?[a-zA-Z0-9_-]+\s+(under|above|below|from|between|with|around)\b",
+        r"^(show|find|search|look\s+for|list|give\s+me|get\s+me)\s+(me\s+)?(the\s+)?(\d+\s+)?(newest|latest|oldest|earliest|most\s+recent)\b",
         r"\b(under|below|less\s+than)\s+aed\s+\d+",
         r"\b(from\s+\d{4}\s+to\s+\d{4}|\d{4}\s+or\s+newer|\d{4}\s+or\s+older)\b",
     ]
@@ -58,19 +60,30 @@ class ContextResolver:
     def resolve(cls, message: str, session: SessionState) -> ContextResolutionResult:
         """
         Main entry point to evaluate if message is a contextual follow-up.
-        Returns a structured ContextResolutionResult.
+        Enforces strict routing precedence:
+        A. Unmistakable fresh-search detection FIRST
+        B. Contextual result-set comparison detection
+        C. Ordinal / specific-car attribute handling
+        D. Make/model reference handling
+        E. Pronoun / deictic handling
+        F. Fallback (NOT_CONTEXTUAL)
         """
         raw_msg = message.strip()
         msg_lower = raw_msg.lower()
 
-        # Check if the query is an unmistakable fresh search
+        # A. Check if the query is an unmistakable fresh search
         if cls._is_unmistakable_fresh_search(msg_lower):
             return ContextResolutionResult(status=ResolutionStatus.NOT_CONTEXTUAL, raw_query=raw_msg)
+
+        # B. Check for whole result-set comparison (e.g. "Which is the latest year model?", "Which is the oldest?")
+        comparison_res = cls._match_result_set_comparison(msg_lower, session, raw_msg)
+        if comparison_res is not None:
+            return comparison_res
 
         # Detect requested attribute
         target_attr = cls._extract_target_attribute(msg_lower)
 
-        # Check for Ordinal or Qualified Ordinal reference (e.g. "that first Honda", "the second one")
+        # C. Check for Ordinal or Qualified Ordinal reference (e.g. "that first Honda", "the second one")
         ordinal_match = cls._match_ordinal_reference(msg_lower, session.current_result_set)
         if ordinal_match is not None:
             status, car, clarify_msg = ordinal_match
@@ -90,7 +103,7 @@ class ContextResolver:
                     raw_query=raw_msg
                 )
 
-        # Check for specific Make/Model reference without ordinal in current results (e.g. "What's the mileage on the Honda?")
+        # D. Check for specific Make/Model reference without ordinal in current results (e.g. "What's the mileage on the Honda?")
         make_match = cls._match_make_reference(msg_lower, session.current_result_set)
         if make_match is not None:
             status, car, clarify_msg = make_match
@@ -109,7 +122,7 @@ class ContextResolver:
                     raw_query=raw_msg
                 )
 
-        # Check for Pronoun / Deictic reference ("it", "its", "that car", "this car", "this one", etc.)
+        # E. Check for Pronoun / Deictic reference ("it", "its", "that car", "this car", "this one", etc.)
         pronoun_match = cls._match_pronoun_reference(msg_lower, session)
         if pronoun_match is not None:
             status, car, clarify_msg = pronoun_match
@@ -130,8 +143,84 @@ class ContextResolver:
                         raw_query=raw_msg
                     )
 
-        # Fallback: Not a contextual follow-up
+        # F. Fallback: Not a contextual follow-up
         return ContextResolutionResult(status=ResolutionStatus.NOT_CONTEXTUAL, raw_query=raw_msg)
+
+    @classmethod
+    def _match_result_set_comparison(
+        cls, msg_lower: str, session: SessionState, raw_msg: str
+    ) -> Optional[ContextResolutionResult]:
+        """
+        Evaluates whether the query is a whole-result-set model-year comparison
+        (e.g., 'Which is the latest year model?' or 'Which is the oldest?').
+        Strictly whole-result-set only.
+        """
+        is_latest = bool(re.search(r"\b(latest|newest|most\s+recent)\b", msg_lower))
+        is_oldest = bool(re.search(r"\b(oldest|earliest)\b", msg_lower))
+
+        if not is_latest and not is_oldest:
+            return None
+
+        # Exclude specific-car ordinal references (e.g. 'Which is the latest on the second car?')
+        ordinal_words_pattern = r"\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last|top)\b"
+        if re.search(ordinal_words_pattern, msg_lower):
+            return None
+
+        # Check comparison phrasing patterns
+        comparison_patterns = [
+            # "which [car/one/vehicle/model] is [the] latest/oldest [model/car/year]?"
+            r"\bwhich\s+(one|car|vehicle|model)?\s*(is|are)?\s*(the\s+)?(latest|newest|most\s+recent|oldest|earliest)\b",
+            # "which [one/car/vehicle/model] has [the] newest/latest/oldest/earliest [model] [year]?"
+            r"\bwhich\s+(one|car|vehicle|model)?\s*(has|have)\s*(the\s+)?(newest|latest|most\s+recent|oldest|earliest)\b",
+            # "what is / what's the latest/newest/oldest/earliest [one/car/vehicle/model] [year]?"
+            r"\b(what\s+is|what's)\s+(the\s+)?(latest|newest|most\s+recent|oldest|earliest)\b",
+            # "which of these / which of them / which of the cars is [the] latest/oldest?"
+            r"\bwhich\s+of\s+(these|them|the\s+cars|the\s+vehicles|the\s+results|the\s+listings)\s+(is|are|has)?\s*(the\s+)?(latest|newest|most\s+recent|oldest|earliest)\b",
+            # "which car/vehicle is latest/oldest?"
+            r"\bwhich\s+(car|vehicle|model|one)\s+(is|are)\s+(the\s+)?(latest|newest|most\s+recent|oldest|earliest)\b",
+            # "which is latest/oldest?"
+            r"^(which|what|what's)\s+(is\s+|has\s+)?(the\s+)?(latest|newest|most\s+recent|oldest|earliest)\b",
+        ]
+
+        if not any(re.search(p, msg_lower) for p in comparison_patterns):
+            return None
+
+        comp_type = ResultSetComparisonType.LATEST_YEAR if is_latest else ResultSetComparisonType.OLDEST_YEAR
+
+        # Handle empty current_result_set
+        if not session.current_result_set:
+            label = "latest" if comp_type == ResultSetComparisonType.LATEST_YEAR else "oldest"
+            return ContextResolutionResult(
+                status=ResolutionStatus.CLARIFICATION_REQUIRED,
+                comparison_type=comp_type,
+                clarification_message=(
+                    f"I don't have a current set of vehicle results to compare. "
+                    f"Search for some cars first, then I can tell you which has the {label} model year."
+                ),
+                raw_query=raw_msg
+            )
+
+        # Non-empty result set: determine max/min year over session.current_result_set
+        valid_years = [c.year for c in session.current_result_set if c.year is not None]
+        if not valid_years:
+            return ContextResolutionResult(
+                status=ResolutionStatus.CLARIFICATION_REQUIRED,
+                comparison_type=comp_type,
+                clarification_message="None of the vehicles in your current results have a valid model year recorded.",
+                raw_query=raw_msg
+            )
+
+        target_year = max(valid_years) if comp_type == ResultSetComparisonType.LATEST_YEAR else min(valid_years)
+        matching_cars = [c for c in session.current_result_set if c.year == target_year]
+
+        return ContextResolutionResult(
+            status=ResolutionStatus.RESULT_SET_COMPARISON,
+            comparison_type=comp_type,
+            comparison_year=target_year,
+            resolved_cars=matching_cars,
+            resolved_car=matching_cars[0] if len(matching_cars) == 1 else None,
+            raw_query=raw_msg
+        )
 
     @classmethod
     def _is_unmistakable_fresh_search(cls, msg_lower: str) -> bool:

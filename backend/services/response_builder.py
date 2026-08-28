@@ -7,7 +7,7 @@ from backend.models.intent import (
     ParsedInventoryQuery,
     UnsupportedConstraint,
 )
-from backend.models.memory import TargetAttribute
+from backend.models.memory import TargetAttribute, ResultSetComparisonType
 
 KNOWN_COMPETITORS = [
     "yallamotor", "carswitch", "kavak", "cars24", "opensooq", "seez",
@@ -147,6 +147,42 @@ class GroundedResponseBuilder:
 
         else:  # ALL_DETAILS
             return f"Here are the details for the {car_ref}:\n\n{cls._format_listing_line(car)}"
+
+    @classmethod
+    def format_result_set_comparison_response(
+        cls,
+        matching_cars: List[Union[CarListing, Dict[str, Any]]],
+        comparison_type: ResultSetComparisonType,
+        target_year: Optional[int] = None,
+    ) -> str:
+        """
+        Deterministically formats factual response for whole-result-set model-year comparisons.
+        Reuses _format_listing_line for each winning vehicle.
+        """
+        if not matching_cars:
+            label = "latest" if comparison_type == ResultSetComparisonType.LATEST_YEAR else "oldest"
+            return (
+                f"I don't have a current set of vehicle results to compare. "
+                f"Search for some cars first, then I can tell you which has the {label} model year."
+            )
+
+        year_val = target_year if target_year is not None else cls._to_car_listing(matching_cars[0]).year
+        comp_label = "latest" if comparison_type == ResultSetComparisonType.LATEST_YEAR else "oldest"
+
+        if len(matching_cars) == 1:
+            header = f"The {comp_label} model year in your current results is {year_val}:"
+            lines = [header, cls._format_listing_line(matching_cars[0])]
+            return "\n\n".join(lines)
+        else:
+            count = len(matching_cars)
+            header = (
+                f"The {comp_label} model year in your current results is {year_val}.\n"
+                f"There are {count} vehicles from {year_val}:"
+            )
+            lines = [header]
+            for car in matching_cars:
+                lines.append(cls._format_listing_line(car))
+            return "\n\n".join(lines)
 
     @staticmethod
     def format_clarification_response(clarification_question: Optional[str]) -> str:

@@ -15,10 +15,11 @@ def test_streamlit_app_loads_and_renders_empty_state():
     # Sidebar components exist
     assert any("User Identity" in inp.label for inp in at.sidebar.text_input)
 
-def test_streamlit_app_renders_offline_warning_when_backend_down():
+def test_streamlit_app_renders_offline_warning_when_backend_down(monkeypatch):
     """Verify Streamlit app displays backend offline warning when FastAPI is unreachable."""
+    from frontend.api_client import DubizzleAPIClient
+    monkeypatch.setattr(DubizzleAPIClient, "health_check", lambda self: False)
     at = AppTest.from_file("../frontend/app.py", default_timeout=10.0)
     at.run()
     assert not at.exception
-    # Since no FastAPI server is running on default port during unit test, warning/error should appear
     assert len(at.sidebar.error) > 0 or len(at.warning) > 0

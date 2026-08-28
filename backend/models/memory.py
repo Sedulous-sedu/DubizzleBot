@@ -19,6 +19,12 @@ class ResolutionStatus(str, Enum):
     NOT_CONTEXTUAL = "not_contextual"
     RESOLVED = "resolved"
     CLARIFICATION_REQUIRED = "clarification_required"
+    RESULT_SET_COMPARISON = "result_set_comparison"
+
+class ResultSetComparisonType(str, Enum):
+    """Supported comparison operations over the current result set."""
+    LATEST_YEAR = "latest_year"
+    OLDEST_YEAR = "oldest_year"
 
 class TargetAttribute(str, Enum):
     """Supported vehicle attributes for follow-up inquiries."""
@@ -36,7 +42,10 @@ class ContextResolutionResult(BaseModel):
     """Structured outcome produced by ContextResolver."""
     status: ResolutionStatus
     resolved_car: Optional[CarListing] = None
+    resolved_cars: Optional[List[CarListing]] = None
     target_attribute: Optional[TargetAttribute] = None
+    comparison_type: Optional[ResultSetComparisonType] = None
+    comparison_year: Optional[int] = None
     clarification_message: Optional[str] = None
     raw_query: str
 

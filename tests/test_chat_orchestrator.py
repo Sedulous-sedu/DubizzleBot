@@ -945,3 +945,221 @@ def test_orchestrator_bare_deictic_uses_active_vehicle_without_llm_or_search(rea
     assert result.response == "The bentley continental (Listing #17) is a 2020 model."
     mock_interp.interpret.assert_not_called()
     inventory_spy.search.assert_not_called()
+
+
+# ==============================================================================
+# 9. CONTEXTUAL MODEL-YEAR COMPARISON REGRESSION TESTS (Phase 4A Enhancement)
+# ==============================================================================
+
+def test_orchestrator_latest_year_comparison_flow_with_multi_turn_ordinal_preservation(real_inventory):
+    """
+    End-to-end multi-turn verification:
+    Turn 1: 'Show me Fords' -> Search returns verified Fords.
+    Turn 2: 'Which is the latest year model?' -> Deterministically returns max year listing(s) with zero LLM/inventory calls.
+    Turn 3: 'What's the mileage on the second one?' -> Proves the second ordinal STILL refers to original search result #2.
+    """
+    mock_interp = MagicMock()
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(make="Ford"),
+        requires_clarification=False,
+        readiness_state=SearchReadinessState.READY
+    )
+
+    inventory_spy = MagicMock(wraps=real_inventory)
+    memory_service = MemoryService()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=inventory_spy,
+        memory_service=memory_service
+    )
+    session_id = str(uuid.uuid4())
+
+    # Turn 1: Search Fords
+    req1 = ChatRequest(user_id="user_test_flow", message="Show me Fords", session_id=session_id)
+    res1 = orchestrator.process_chat(req1)
+    assert res1.total_matches > 0
+    original_results = res1.matched_cars
+    max_year = max(c.year for c in original_results)
+    expected_winners = [c for c in original_results if c.year == max_year]
+    assert mock_interp.interpret.call_count == 1
+    assert inventory_spy.search.call_count == 1
+
+    # Turn 2: Ask for latest year model
+    req2 = ChatRequest(user_id="user_test_flow", message="Which is the latest year model?", session_id=session_id)
+    res2 = orchestrator.process_chat(req2)
+
+    # Zero additional LLM / inventory calls
+    assert mock_interp.interpret.call_count == 1
+    assert inventory_spy.search.call_count == 1
+    assert res2.total_matches == len(expected_winners)
+    assert [c.listing_id for c in res2.matched_cars] == [c.listing_id for c in expected_winners]
+    assert f"{max_year}" in res2.response
+    assert "The latest model year in your current results is" in res2.response
+
+    # Verify session.current_result_set is completely intact and unmutated
+    session = memory_service.get_session("user_test_flow", session_id)
+    assert len(session.current_result_set) == len(original_results)
+    assert [c.listing_id for c in session.current_result_set] == [c.listing_id for c in original_results]
+
+    # Turn 3: "What's the mileage on the second one?" must resolve against ORIGINAL result set car #2
+    if len(original_results) >= 2:
+        second_car = original_results[1]
+        req3 = ChatRequest(user_id="user_test_flow", message="What's the mileage on the second one?", session_id=session_id)
+        res3 = orchestrator.process_chat(req3)
+        assert mock_interp.interpret.call_count == 1  # Still no extra LLM call
+        assert res3.total_matches == 1
+        assert res3.matched_cars[0].listing_id == second_car.listing_id
+        if second_car.mileage_km is not None:
+            assert f"{second_car.mileage_km:,} km" in res3.response
+
+def test_orchestrator_comparison_tied_winners_order_and_counts(real_inventory):
+    """Verify tied winners preserve original order and ChatResponse contains only tied winners."""
+    mock_interp = MagicMock()
+    inventory_spy = MagicMock(wraps=real_inventory)
+    memory_service = MemoryService()
+    session_id = str(uuid.uuid4())
+
+    # Pre-populate session with known test listings: 2012, 2014, 2011, 2014
+    car1 = CarListing(listing_id=101, make="Ford", model="Explorer", year=2012, title="2012 Ford Explorer", description="Clean")
+    car2 = CarListing(listing_id=102, make="Ford", model="Edge", year=2014, title="2014 Ford Edge", description="Clean")
+    car3 = CarListing(listing_id=103, make="Ford", model="Focus", year=2011, title="2011 Ford Focus", description="Clean")
+    car4 = CarListing(listing_id=104, make="Ford", model="Mustang", year=2014, title="2014 Ford Mustang", description="Clean")
+
+    session = memory_service.get_or_create_session("tie_user", session_id)
+    session.current_result_set = [car1, car2, car3, car4]
+    memory_service.save_session(session)
+
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=inventory_spy,
+        memory_service=memory_service
+    )
+
+    req = ChatRequest(user_id="tie_user", message="Which one is the latest?", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert mock_interp.interpret.call_count == 0
+    assert inventory_spy.search.call_count == 0
+    assert res.total_matches == 2
+    assert [c.listing_id for c in res.matched_cars] == [102, 104]  # Preserved original relative order
+    assert "The latest model year in your current results is 2014" in res.response
+    assert "There are 2 vehicles from 2014" in res.response
+    assert "Listing #102" in res.response
+    assert "Listing #104" in res.response
+
+def test_orchestrator_oldest_year_comparison_flow(real_inventory):
+    """Verify 'Which is the oldest?' correctly finds min(year) listing."""
+    mock_interp = MagicMock()
+    inventory_spy = MagicMock(wraps=real_inventory)
+    memory_service = MemoryService()
+    session_id = str(uuid.uuid4())
+
+    car1 = CarListing(listing_id=201, make="Toyota", model="Camry", year=2018, title="2018 Toyota Camry", description="Clean")
+    car2 = CarListing(listing_id=202, make="Toyota", model="Corolla", year=2015, title="2015 Toyota Corolla", description="Clean")
+    car3 = CarListing(listing_id=203, make="Toyota", model="Yaris", year=2020, title="2020 Toyota Yaris", description="Clean")
+
+    session = memory_service.get_or_create_session("oldest_user", session_id)
+    session.current_result_set = [car1, car2, car3]
+    memory_service.save_session(session)
+
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=inventory_spy,
+        memory_service=memory_service
+    )
+
+    req = ChatRequest(user_id="oldest_user", message="Which is the oldest model?", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert mock_interp.interpret.call_count == 0
+    assert inventory_spy.search.call_count == 0
+    assert res.total_matches == 1
+    assert res.matched_cars[0].listing_id == 202
+    assert "The oldest model year in your current results is 2015" in res.response
+    assert "Listing #202" in res.response
+
+def test_orchestrator_empty_result_set_comparison_clarification(real_inventory):
+    """Verify comparison on empty session returns clarification with zero LLM/inventory calls."""
+    mock_interp = MagicMock()
+    inventory_spy = MagicMock(wraps=real_inventory)
+    memory_service = MemoryService()
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=inventory_spy,
+        memory_service=memory_service
+    )
+    session_id = str(uuid.uuid4())
+
+    req = ChatRequest(user_id="empty_user", message="Which is the latest year model?", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert mock_interp.interpret.call_count == 0
+    assert inventory_spy.search.call_count == 0
+    assert res.requires_clarification is True
+    assert res.total_matches == 0
+    assert res.matched_cars is None
+    assert "Search for some cars first" in res.response
+    assert "latest model year" in res.response
+
+def test_orchestrator_comparison_preserves_active_listing_id(real_inventory):
+    """Verify session.active_listing_id is preserved exactly before and after comparison."""
+    mock_interp = MagicMock()
+    memory_service = MemoryService()
+    session_id = str(uuid.uuid4())
+
+    car1 = CarListing(listing_id=301, make="BMW", model="320i", year=2017, title="2017 BMW 320i", description="Clean")
+    car2 = CarListing(listing_id=302, make="BMW", model="530i", year=2021, title="2021 BMW 530i", description="Clean")
+
+    session = memory_service.get_or_create_session("active_id_user", session_id)
+    session.current_result_set = [car1, car2]
+    session.active_listing_id = 301  # Focused on 301 before comparison
+    memory_service.save_session(session)
+
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=real_inventory,
+        memory_service=memory_service
+    )
+
+    req = ChatRequest(user_id="active_id_user", message="Which one is the latest?", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert res.total_matches == 1
+    assert res.matched_cars[0].listing_id == 302
+    # Active listing ID must remain 301 (preserved)
+    post_session = memory_service.get_session("active_id_user", session_id)
+    assert post_session.active_listing_id == 301
+
+def test_orchestrator_fresh_ranking_queries_follow_interpreter_unsupported_path(real_inventory):
+    """Verify fresh ranking queries like 'Show me the newest cars' are NOT intercepted as session comparisons."""
+    mock_interp = MagicMock()
+    mock_interp.interpret.return_value = ParsedUserIntent(
+        intent=UserIntentEnum.INVENTORY_SEARCH,
+        query_filters=ParsedInventoryQuery(),
+        requires_clarification=False,
+        clarification_question=None,
+        unsupported_constraints=[UnsupportedConstraint(field="ranking", requested_value="newest", reason="Ranking not supported")],
+        readiness_state=SearchReadinessState.UNSUPPORTED_CONSTRAINTS_PRESENT
+    )
+
+    memory_service = MemoryService()
+    session_id = str(uuid.uuid4())
+    # Session has existing cars, but user issues a fresh command
+    car1 = CarListing(listing_id=401, make="Ford", model="Edge", year=2015, title="2015 Ford Edge", description="Clean")
+    session = memory_service.get_or_create_session("fresh_user", session_id)
+    session.current_result_set = [car1]
+    memory_service.save_session(session)
+
+    orchestrator = ChatOrchestrator(
+        query_interpreter=mock_interp,
+        inventory_service=real_inventory,
+        memory_service=memory_service
+    )
+
+    req = ChatRequest(user_id="fresh_user", message="Show me the newest cars", session_id=session_id)
+    res = orchestrator.process_chat(req)
+
+    assert mock_interp.interpret.call_count == 1  # Verified: routed to interpreter, NOT intercepted!
+    assert "reliably rank" in res.response or "ranking" in res.response.lower()
+
